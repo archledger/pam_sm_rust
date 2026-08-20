@@ -55,6 +55,23 @@ The enclosing fork commit is named `feat: own irlume PAM token boundary`.
 Later downstream changes must add their exact commit, rationale, affected API,
 tests, and originating irlume issue or pull request to this ledger.
 
+### Checked PAM entrypoint dispatch
+
+Design source:
+[irlume PR #503](https://github.com/archledger/irlume/pull/503), merged as
+[`8862672c7a9063f3fe648c15e91f48c7d4f6a031`](https://github.com/archledger/irlume/commit/8862672c7a9063f3fe648c15e91f48c7d4f6a031).
+The enclosing fork commit is named `fix: validate PAM entrypoint pointers`.
+
+- Export the PAM callback handle with its real raw-pointer C ABI.
+- Route all six `pam_sm_*` symbols through one checked dispatcher.
+- Reject null handles, negative or oversized argument counts, null arrays,
+  null elements, and invalid UTF-8 before the Rust hook runs.
+- Bound module arguments at 256 and preserve their order.
+- Convert hook and panic-payload destructor panics to `PAM_ABORT` without
+  unwinding across the C boundary.
+- Cover the dispatcher with focused unit tests and all six macro-expanded
+  entrypoints with an integration test.
+
 ## Updating from upstream
 
 1. Fetch the original `master` into the fork's `master` without downstream

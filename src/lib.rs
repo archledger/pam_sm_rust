@@ -29,6 +29,8 @@
 #[macro_use]
 extern crate bitflags;
 
+#[doc(hidden)]
+pub mod entrypoint;
 #[cfg(feature = "libpam")]
 mod libpam;
 mod pam;

@@ -5,13 +5,18 @@
 
 use pam_types::PamHandle;
 use std::fmt;
-use std::os::raw::c_int;
+use std::os::raw::{c_int, c_void};
+use std::ptr::NonNull;
 
 /// Opaque PAM handle, with additional native methods available via `PamLibExt`.
 #[repr(transparent)]
 pub struct Pam(pub(crate) PamHandle);
 
 impl Pam {
+    pub(crate) fn from_non_null(handle: NonNull<c_void>) -> Self {
+        Self(handle.as_ptr())
+    }
+
     /// This allows sending the `Pam` handle to another thread.
     /// ```rust
     /// # use pamsm::Pam;
@@ -214,30 +219,23 @@ macro_rules! pam_module {
                 #[no_mangle]
                 #[doc(hidden)]
                 pub unsafe extern "C" fn $pam_cb(
-                    pamh: pamsm::Pam,
+                    pamh: *mut std::os::raw::c_void,
                     flags: std::os::raw::c_int,
                     argc: std::os::raw::c_int,
                     argv: *const *const std::os::raw::c_char,
                 ) -> std::os::raw::c_int {
-                    use std::os::raw::c_int;
-                    if argc < 0 {
-                        return pamsm::PamError::SERVICE_ERR as std::os::raw::c_int;
+                    // SAFETY: libpam supplies the callback arguments. The
+                    // shared dispatcher validates nulls, bounds, strings, and
+                    // panics before invoking the Rust hook.
+                    unsafe {
+                        $crate::entrypoint::invoke_hook(
+                            pamh,
+                            flags,
+                            argc,
+                            argv,
+                            |pamh, flags, args| <$pamsm_ty>::$rust_cb(pamh, flags, args),
+                        )
                     }
-
-                    let mut args = Vec::<String>::with_capacity(argc as usize);
-                    for count in 0..(argc as isize) {
-                        match {
-                            std::ffi::CStr::from_ptr(
-                                *argv.offset(count) as *const std::os::raw::c_char
-                            )
-                            .to_str()
-                        } {
-                            Ok(s) => args.push(s.to_owned()),
-                            Err(_) => return pamsm::PamError::SERVICE_ERR as c_int,
-                        };
-                    }
-                    <$pamsm_ty>::$rust_cb(pamh, pamsm::PamFlags::from_bits_unchecked(flags), args)
-                        as c_int
                 }
             };
         }
