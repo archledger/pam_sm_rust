@@ -20,6 +20,12 @@ zeroize = "1"
 [features]
 libpam = []
 
+[[example]]
+name = "test_module"
+path = "tests/fixtures/test_module.rs"
+crate-type = ["cdylib"]
+required-features = ["libpam"]
+
 [package.metadata.release]
 sign-commit = true
 upload-doc = false
