@@ -6,21 +6,19 @@
 
 //! PAM Service Module wrappers
 //! # Usage
-//! For example, here is a time based authentication module :
+//! For example, here is a module that only authenticates when invoked with
+//! the `allow` argument :
 //!
 //! ```rust,no_run
 //! #[macro_use] extern crate pamsm;
-//! extern crate time;
 //!
 //! use pamsm::{PamServiceModule, Pam, PamFlags, PamError};
 //!
-//! struct PamTime;
+//! struct PamArg;
 //!
-//! impl PamServiceModule for PamTime {
+//! impl PamServiceModule for PamArg {
 //!     fn authenticate(pamh: Pam, _: PamFlags, args: Vec<String>) -> PamError {
-//!         let hour = time::OffsetDateTime::now_utc().hour();
-//!         if hour != 4 {
-//!             // Only allow authentication when it's 4 AM
+//!         if args.iter().any(|a| a == "allow") {
 //!             PamError::SUCCESS
 //!         } else {
 //!             PamError::AUTH_ERR
@@ -28,7 +26,7 @@
 //!     }
 //! }
 //!
-//! pam_module!(PamTime);
+//! pam_module!(PamArg);
 //! ```
 #[macro_use]
 extern crate bitflags;

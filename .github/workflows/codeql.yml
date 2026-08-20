@@ -1,0 +1,49 @@
+# CodeQL analysis for Rust.
+#
+# Rust is analyzed without building (rust-analyzer based), so `none` is the
+# only build mode needed. The action is pinned to the same commit irlume uses.
+
+name: CodeQL
+
+on:
+  push:
+    branches:
+      - irlume-patches
+  pull_request:
+    branches:
+      - irlume-patches
+  schedule:
+    # Weekly Saturday 00:00 UTC.
+    - cron: "0 0 * * 6"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (rust)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      # Upload SARIF to the Security tab. This is the only write grant in the
+      # fork's workflows and is scoped to security events.
+      security-events: write
+      actions: read
+      contents: read
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
+        with:
+          languages: rust
+          build-mode: none
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
+        with:
+          category: "/language:rust"

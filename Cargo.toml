@@ -9,9 +9,8 @@ homepage = "https://github.com/archledger/pam_sm_rust"
 repository = "https://github.com/archledger/pam_sm_rust"
 keywords = ["pam", "service", "module", "wrapper", "ffi"]
 categories = ["os::unix-apis", "authentication", "api-bindings"]
-
-[dev-dependencies]
-time = "^0.2"
+rust-version = "1.88"
+edition = "2021"
 
 [dependencies]
 bitflags = "2"

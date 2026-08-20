@@ -1,0 +1,6 @@
+# actionlint configuration.
+# The repo has no problem matchers or local actions; keep the defaults strict.
+
+self-hosted-runner:
+  # No self-hosted runners are used by this repository.
+  labels: ~

@@ -1,71 +1,147 @@
+# Required-check CI for the irlume-maintained pamsm fork.
+#
+# Job names are the required branch-protection contexts (see
+# tests/workflow_contract.sh). Everything is SHA-pinned and no step
+# retains checkout credentials.
+
 name: ci
 
 on:
   push:
     branches:
-      - main
-      - master
       - irlume-patches
+      - master
   pull_request:
     branches:
-      - master
       - irlume-patches
+      - master
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  test-and-lint:
-    name: test-and-lint (rust ${{ matrix.rust }})
-    runs-on: ubuntu-latest
+  test:
+    name: fmt · clippy · build · test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        rust: [stable, nightly]
-    continue-on-error: ${{ matrix.rust == 'nightly' }}
+        # MSRV is exactly 1.88; the second leg tracks current stable.
+        rust: ["1.88.0", stable]
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          toolchain: ${{ matrix.rust }}
-          components: rustfmt, clippy
+          persist-credentials: false
 
-      - name: Build all targets
-        run: cargo build --all-targets
-
-      - name: Format check
-        run: cargo fmt --all -- --check
-
-      - name: Run full test suite
-        run: cargo test --all-targets
-
-      - name: Lint
-        if: matrix.rust == 'stable'
-        run: cargo clippy --all-targets --all-features -- -D warnings -A clippy::incompatible-msrv
-
-      - name: Install libpam development headers
+      - name: Install libpam headers (needed by the libpam feature)
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libpam0g-dev
 
-      - name: Build PAM test fixture module
+      - name: Set up Rust ${{ matrix.rust }}
+        # @master declares the `toolchain` input; version tags do not.
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: rustfmt, clippy
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (strict, all targets and features)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build
+        run: cargo build --all-targets --all-features
+
+      - name: Tests (including libpam-gated unit tests)
+        run: cargo test --all-targets --all-features
+
+      - name: Docs
+        if: matrix.rust == 'stable'
+        run: RUSTDOCFLAGS='-D warnings' cargo doc --all-features --no-deps
+
+  pamwrap:
+    name: pam_wrapper integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
+
+      - name: Install PAM test stack
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpam0g-dev libpam-wrapper pamtester
+      - name: Build the fixture cdylib
         run: cargo build --example test_module --features libpam
 
-      - name: Verify PAM entrypoint symbol exports
+      - name: Exported-symbol audit (exactly six pam_sm_* symbols)
         run: bash tests/symbols.sh
 
-      - name: Install optional PAM wrapper test dependencies
-        continue-on-error: true
+      - name: Real PAM integration (serial; PAM process-global state)
+        run: cargo test --test pamwrap -- --include-ignored --test-threads=1
+
+      - name: Secret scan of captured harness output
         run: |
-          if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get install -y --no-install-recommends libpam-wrapper pamtester || true
-          else
-            echo "apt-get not available; skipping optional PAM wrapper test dependencies"
+          if grep -rn 'fixed-ci-dummy' target/pamsm-test-logs 2>/dev/null; then
+            echo 'dummy token leaked into captured output' >&2
+            exit 1
           fi
 
-      - name: Run PAM wrapper integration compile/tests
-        continue-on-error: true
-        run: cargo test --test pamwrap -- --include-ignored --test-threads=1
+  deny:
+    name: cargo-deny (advisories · licenses · sources)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories bans licenses sources
+
+  dco:
+    name: DCO (exactly one trailer)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Full history so the base-to-head range can be enumerated.
+          fetch-depth: 0
+
+      - name: Every commit carries exactly one Signed-off-by trailer
+        run: |
+          set -euo pipefail
+          base='${{ github.event.pull_request.base.sha }}'
+          head='${{ github.event.pull_request.head.sha }}'
+          if [ -z "$base" ] || [ "$base" = '' ]; then
+            # Push event: audit every commit in the pushed range.
+            base='${{ github.event.before }}'
+            head='${{ github.sha }}'
+          fi
+          # Non-merge ancestry of the range.
+          range=$(git rev-list --no-merges "$base..$head" 2>/dev/null || true)
+          if [ -z "$range" ]; then
+            range=$(git rev-list --no-merges -n 1 "$head")
+          fi
+          status=0
+          for c in $range; do
+            n=$(git log -1 --format='%(trailers:only=true)' "$c" | grep -c '^Signed-off-by: .\+ <.\+@.\+>$' || true)
+            if [ "$n" -ne 1 ]; then
+              printf 'DCO: %s has %s Signed-off-by trailers (need exactly 1)\n' \
+                "$(git log -1 --format='%h %s' "$c")" "$n" >&2
+              status=1
+            fi
+          done
+          exit $status

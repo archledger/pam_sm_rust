@@ -41,14 +41,14 @@ This crate supports the following optional features:
 
 ```bash
 # Full crate checks
-cargo test --all-targets --locked
+cargo test --all-targets
 
 # Full formatting + lint checks
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features --locked -- -D warnings -A clippy::incompatible-msrv
+cargo clippy --all-targets --all-features -- -D warnings -A clippy::incompatible-msrv
 
 # PAM fixture module and symbol validation
-cargo build --example test_module --features libpam --locked
+cargo build --example test_module --features libpam
 bash tests/symbols.sh
 ```
 

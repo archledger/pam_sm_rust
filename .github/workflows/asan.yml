@@ -1,0 +1,78 @@
+# AddressSanitizer/LeakSanitizer run of the full fork suite.
+#
+# Sanitizer output is a failure; there are no suppression files. If a
+# deliberate leak is ever accepted, it needs a named allocation stack and a
+# written rationale in this repository first.
+
+name: asan
+
+on:
+  push:
+    branches:
+      - irlume-patches
+  pull_request:
+    branches:
+      - irlume-patches
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUSTFLAGS: -Zsanitizer=address
+  ASAN_OPTIONS: detect_stack_use_after_return=1:abort_on_error=1
+
+jobs:
+  asan:
+    name: AddressSanitizer (test suite)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install libpam headers and the LLVM symbolizer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpam0g-dev libpam-wrapper pamtester llvm clang
+
+      - name: Install nightly Rust (-Zsanitizer is unstable)
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: nightly
+          components: rust-src
+
+      - name: Locate the ASan runtime for the uninstrumented pamtester host
+        run: |
+          set -euo pipefail
+          rt=$(find /usr/lib/llvm* /usr/lib/clang* /usr/lib*/clang* \
+            -name 'libclang_rt.asan*.so' -o -name 'libasan.so.*' 2>/dev/null \
+            | sort -V | tail -1)
+          if [ -z "$rt" ]; then
+            echo 'no ASan runtime found for LD_PRELOAD' >&2
+            exit 1
+          fi
+          echo "PAMSM_TEST_PREPEND_PRELOAD=$rt" >> "$GITHUB_ENV"
+
+      - name: Build the fixture cdylib for the explicit target
+        run: cargo +nightly build --example test_module --features libpam --target x86_64-unknown-linux-gnu
+
+      - name: Run the full suite under ASan/LSan (explicit target and symbolizer)
+        env:
+          ASAN_OPTIONS: ${{ env.ASAN_OPTIONS }}:external_symbolizer_path=/usr/bin/llvm-symbolizer
+          # Suppressions are limited to the documented deliberate leak of
+          # contained panic payloads; see .github/lsan-suppressions.txt.
+          LSAN_OPTIONS: external_symbolizer_path=/usr/bin/llvm-symbolizer:suppressions=${{ github.workspace }}/.github/lsan-suppressions.txt:print_suppressions=1
+        run: |
+          set -euo pipefail
+          rustup component add rustfmt clippy || true
+          cargo +nightly test --all-features --target x86_64-unknown-linux-gnu
+          cargo +nightly test --test pamwrap --target x86_64-unknown-linux-gnu -- --include-ignored --test-threads=1
+
+      - name: Secret scan of captured harness output
+        run: |
+          if grep -rn 'fixed-ci-dummy' target/pamsm-test-logs 2>/dev/null; then
+            echo 'dummy token leaked into captured output' >&2
+            exit 1
+          fi

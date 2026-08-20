@@ -74,32 +74,36 @@ or set PAM_WRAPPER_SO)"
         .unwrap();
     }
 
-    fn run(
-        &self,
-        service: &str,
-        op: &str,
-        username: &str,
-        env_token: Option<&str>,
-    ) -> (bool, String) {
+    fn run(&self, service: &str, op: &str, username: &str) -> (bool, String) {
         fs::create_dir_all(&self.logs_root).unwrap();
         let mut cmd = Command::new("pamtester");
         cmd.arg("-I").arg("rhost=127.0.0.1");
         cmd.arg(service).arg(username).arg(op);
         cmd.env("LD_PRELOAD", &self.wrapper);
+        // Under `-Zsanitizer=address` the fixture cdylib expects the ASan
+        // runtime to exist in the host process. pamtester is uninstrumented,
+        // so the runtime must be preloaded ahead of pam_wrapper. The ASan job
+        // sets this to the compiler-rt runtime; nothing else needs it.
+        if let Ok(prepend) = std::env::var("PAMSM_TEST_PREPEND_PRELOAD") {
+            cmd.env(
+                "LD_PRELOAD",
+                format!("{prepend}:{}", self.wrapper.display()),
+            );
+            // pam_wrapper dlopens service modules with RTLD_DEEPBIND, which
+            // the ASan runtime refuses. Older pam_wrapper (1.1.5 on Ubuntu
+            // noble) reads UID_WRAPPER_DISABLE_DEEPBIND; 1.1.7+ renamed it to
+            // PAM_WRAPPER_DISABLE_DEEPBIND. Set both so either build accepts.
+            // The runtime's own "libasan.so" LD_PRELOAD autodetection does not
+            // match libclang_rt.asan, so the env switches are required.
+            cmd.env("PAM_WRAPPER_DISABLE_DEEPBIND", "1");
+            cmd.env("UID_WRAPPER_DISABLE_DEEPBIND", "1");
+        }
         cmd.env("PAM_WRAPPER", "1");
         cmd.env("PAM_WRAPPER_SERVICE_DIR", &self.service_dir);
         cmd.env("PAMSM_TEST", EXPECTED_ENV_VALUE);
         cmd.env("PAMSM_TEST_LOG_DIR", &self.logs_root);
-        cmd.env("PAMSM_TEST_CASE", format!("{}:{op}", username));
-
-        match env_token {
-            Some(token) => {
-                cmd.env("PAM_AUTHTOK", token);
-            }
-            None => {
-                cmd.env_remove("PAM_AUTHTOK");
-            }
-        }
+        cmd.env("PAMSM_TEST_CASE", format!("{username}:{op}"));
+        cmd.env_remove("PAM_AUTHTOK");
 
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -157,7 +161,12 @@ fn built_module() -> PathBuf {
         return path.canonicalize().unwrap_or(path);
     }
 
-    panic!("failed to locate libtest_module.so; run `cargo build --example test_module --features libpam` first");
+    panic!(
+        "failed to locate libtest_module.so; run `cargo build --example test_module --features libpam` first; \
+         current_exe={:?} manifest={:?}",
+        std::env::current_exe(),
+        env!("CARGO_MANIFEST_DIR")
+    );
 }
 
 fn locate_module() -> Option<PathBuf> {
@@ -167,6 +176,9 @@ fn locate_module() -> Option<PathBuf> {
             candidates.push(deps.to_path_buf());
             if let Some(profile_dir) = deps.parent() {
                 candidates.push(profile_dir.to_path_buf());
+                // Under an explicit `--target <triple>` build the example
+                // cdylib lands in <target>/<triple>/<profile>/examples.
+                candidates.push(profile_dir.join("examples"));
             }
         }
     }
@@ -192,6 +204,21 @@ fn locate_module() -> Option<PathBuf> {
     candidates.push(workspace.join("target").join("release").join("deps"));
     candidates.push(workspace.join("target").join("release"));
 
+    // Last resort: the freshly built example exists somewhere under the
+    // target directory regardless of profile/triple layout (including a
+    // CARGO_TARGET_DIR outside the workspace when it is absolute).
+    let mut search_roots: Vec<PathBuf> = Vec::new();
+    if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
+        let base = PathBuf::from(target_dir);
+        if base.is_absolute() {
+            search_roots.push(base);
+        }
+    }
+    search_roots.push(workspace.join("target"));
+    for root in search_roots {
+        candidates.extend(search_examples(&root));
+    }
+
     for dir in &candidates {
         if let Some(module) = find_module_in_dir(dir) {
             return Some(module);
@@ -199,6 +226,33 @@ fn locate_module() -> Option<PathBuf> {
     }
 
     None
+}
+
+/// Recursively collect directories that directly contain the built example,
+/// bounded in depth so a large target tree cannot stall discovery.
+fn search_examples(root: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
+        if depth == 0 {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for ent in entries.filter_map(Result::ok) {
+            let path = ent.path();
+            if path.is_dir() {
+                if path.join("libtest_module.so").is_file() {
+                    out.push(path.clone());
+                }
+                walk(&path, depth - 1, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if root.is_dir() {
+        walk(root, 4, &mut out);
+    }
+    out
 }
 
 fn find_module_in_dir(dir: &Path) -> Option<PathBuf> {
@@ -241,7 +295,7 @@ fn run_for_op(op: &str, user: &str) -> Option<(bool, String, String)> {
     let h = Harness::try_new(op)?;
     let service = format!("pamsm-{op}");
     h.write_service(&service, &h.service_lines());
-    let (ok, out) = h.run(&service, op, user, None);
+    let (ok, out) = h.run(&service, op, user);
     let trace = read_trace(&h);
     Some((ok, out, trace))
 }

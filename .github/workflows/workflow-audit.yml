@@ -1,0 +1,62 @@
+# Workflow correctness and security linting.
+#
+# actionlint is the correctness half (bad expressions, unknown contexts);
+# zizmor is the security half (injection patterns, excessive permissions).
+# Both run on every workflow change and every push to the patch branch.
+
+name: workflow-audit
+
+on:
+  push:
+    branches:
+      - irlume-patches
+  pull_request:
+    branches:
+      - irlume-patches
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: actionlint (workflow correctness)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: actionlint
+        env:
+          # Pinned by version and verified by checksum; update both together
+          # from the upstream checksums file.
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSLO "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
+          echo "${ACTIONLINT_SHA256}  ${tarball}" | sha256sum -c -
+          tar xzf "$tarball" actionlint
+          ./actionlint -color
+
+  zizmor:
+    name: zizmor (workflow security)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      # Results are uploaded as SARIF; no advanced-security write token.
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
+        with:
+          # Pinned version, so a new zizmor release cannot turn a green
+          # branch red without an explicit update.
+          version: "1.28.0"
