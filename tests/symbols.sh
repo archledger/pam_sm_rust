@@ -21,7 +21,7 @@ if [[ ! -f "${MODULE_PATH}" ]]; then
   MODULE_DIR="${REPO_ROOT}/target/release/deps"
 fi
 if [[ -z "${MODULE_PATH:-}" || ! -f "${MODULE_PATH}" ]]; then
-  MODULE_PATH="$(rg --files "${MODULE_DIR}" -g 'libtest_module*.so' | head -n 1)"
+  MODULE_PATH="$(find "${MODULE_DIR}" -maxdepth 1 -name 'libtest_module*.so' -print | head -n 1)"
 fi
 
 if [[ ! -f "${MODULE_PATH}" ]]; then
@@ -29,7 +29,7 @@ if [[ ! -f "${MODULE_PATH}" ]]; then
   exit 1
 fi
 
-mapfile -t actual < <(nm -D --defined-only "${MODULE_PATH}" | awk '$1 ~ /^[0-9a-f]+$/ {print $3}' | rg '^pam_sm_' | sort -u)
+mapfile -t actual < <(nm -D --defined-only "${MODULE_PATH}" | awk '$1 ~ /^[0-9a-f]+$/ {print $3}' | grep '^pam_sm_' | sort -u)
 mapfile -t expected < <(cat <<'EOF' | sort -u
 pam_sm_acct_mgmt
 pam_sm_authenticate
