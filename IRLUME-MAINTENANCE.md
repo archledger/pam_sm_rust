@@ -90,6 +90,30 @@ The enclosing fork commit is named `refactor: confine PAM handles to callbacks`.
 - Cover callback-thread confinement with compile-fail documentation and verify
   unknown-bit delivery through a macro-expanded PAM entrypoint.
 
+### Zeroizing PAM module secrets
+
+Design source:
+[irlume PR #503](https://github.com/archledger/irlume/pull/503), merged as
+[`8862672c7a9063f3fe648c15e91f48c7d4f6a031`](https://github.com/archledger/irlume/commit/8862672c7a9063f3fe648c15e91f48c7d4f6a031).
+The enclosing fork commit is named `fix: zeroize PAM module secrets`.
+
+- Replace plain `Vec<u8>` module storage with opaque `PamSecretBytes`, explicit
+  borrowed exposure, and redacted `Debug` output.
+- Zeroize the initialized bytes and full spare capacity before releasing a
+  secret allocation.
+- Add owned `send_secret` and transaction-borrowed `get_secret`; failed secret
+  and generic typed-data registrations reclaim immediately, while secret
+  retrieval rejects errors and null success outputs before constructing a
+  reference.
+- Remove `send_bytes`, `retrieve_bytes`, `PamByteData`, and `PamCleanupCb` so no
+  public non-zeroizing byte-storage alternative remains.
+- Contain stored-value, cleanup-observer, and panic-payload destructor panics;
+  tolerate null cleanup pointers and free accepted allocations exactly once
+  on replacement or transaction end.
+- Cover redaction, explicit exposure, zeroization sabotage, ownership transfer,
+  null/error retrieval, replacement/end cleanup, and panic containment with
+  focused tests; migrate the example module to the secret API.
+
 ## Updating from upstream
 
 1. Fetch the original `master` into the fork's `master` without downstream

@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use module_data::{cleanup_boxed, contain_cleanup, PamSecretBytes};
 use pam::{Pam, PamError, PamFlags};
 use pam_types::{LogLvl, PamHandle, PamItemType, PamMsgStyle};
 use std::ffi::{CStr, CString, NulError};
@@ -9,14 +10,6 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::ptr;
 
 pub type PamResult<T> = Result<T, PamError>;
-/// Prototype of the callback used with [`PamLibExt::send_bytes`]
-pub type PamCleanupCb = fn(&Vec<u8>, Pam, PamFlags, PamError);
-
-#[derive(Clone)]
-struct PamByteData {
-    cb: Option<PamCleanupCb>,
-    data: Vec<u8>,
-}
 
 /// Trait to implement for data stored with pam using [`PamLibExt::send_data`]
 /// in order to provide a cleanup callback.
@@ -47,14 +40,6 @@ pub trait PamData {
     /// The cleanup method will be called before the data is dropped by pam.
     /// See `pam_set_data (3)`
     fn cleanup(&self, _pam: Pam, _flags: PamFlags, _status: PamError) {}
-}
-
-impl PamData for PamByteData {
-    fn cleanup(&self, pam: Pam, flags: PamFlags, status: PamError) {
-        if let Some(cb) = self.cb {
-            (cb)(&self.data, pam, flags, status);
-        }
-    }
 }
 
 /// Blanket implementation for types that implement `Deref<T>` when `T` implements `PamData`.
@@ -170,12 +155,9 @@ pub trait PamLibExt: private::Sealed {
     /// [`PamData::cleanup`] is called on the data previously stored.
     /// The same happens when the application calls `pam_end (3)`
     ///
-    /// If your data can be converted into / from [`Vec<u8>`][std::vec::Vec]
-    /// you should consider using the [`send_bytes`][Self::send_bytes] method instead.
-    ///
     /// # Safety
-    /// This method should not be used if the [`send_bytes`][Self::send_bytes] method is also used
-    /// with the same `module_name`.
+    /// The same `module_name` must not be shared with typed data of another
+    /// concrete type.
     unsafe fn send_data<T: PamData + Clone + Send>(
         &self,
         module_name: &str,
@@ -192,23 +174,22 @@ pub trait PamLibExt: private::Sealed {
     /// The type parameter `T` must be the same as the one used in
     /// [`send_data<T>`][Self::send_data] with the name `module_name`.
     ///
-    /// If the data was stored with [`send_bytes`][Self::send_bytes] you must use
-    /// [`retrieve_bytes`][Self::retrieve_bytes] instead.
     unsafe fn retrieve_data<T: PamData + Clone + Send>(&self, module_name: &str) -> PamResult<T>;
 
-    /// Similar to [`send_data`][Self::send_data], but only works with [`Vec<u8>`][std::vec::Vec].
-    /// The PamData trait doesn't have to be implemented on the data, a callback can be passed
-    /// as an argument instead.
-    fn send_bytes(
-        &self,
-        module_name: &str,
-        data: Vec<u8>,
-        cb: Option<PamCleanupCb>,
-    ) -> PamResult<()>;
+    /// Store owned secret bytes in this PAM transaction.
+    ///
+    /// Ownership transfers to PAM only when `pam_set_data` succeeds. The
+    /// secret is zeroized before release on replacement, transaction end, or
+    /// registration failure.
+    fn send_secret(&self, key: &str, value: PamSecretBytes) -> PamResult<()>;
 
-    /// Retrieve bytes previously stored with [`send_bytes`][Self::send_bytes].
-    /// The result is a clone of the data.
-    fn retrieve_bytes(&self, module_name: &str) -> PamResult<Vec<u8>>;
+    /// Borrow secret bytes previously stored with [`send_secret`][Self::send_secret].
+    ///
+    /// # Safety
+    ///
+    /// `key` must identify a value registered by `send_secret`, and that value
+    /// must not be replaced while the returned borrow is live.
+    unsafe fn get_secret<'a>(&'a self, key: &str) -> PamResult<&'a PamSecretBytes>;
 
     /// Send a message to syslog.
     fn syslog(&self, lvl: LogLvl, msg: &str) -> PamResult<()>;
@@ -343,15 +324,22 @@ impl PamLibExt for Pam {
         module_name: &str,
         data: T,
     ) -> PamResult<()> {
-        // The data has to be allocated on the heap because it will outlive the call stack.
-        let data_copy = Box::new(data);
-        PamError::new(pam_set_data(
-            self.0,
-            CString::new(module_name)?.as_ptr(),
-            Box::into_raw(data_copy) as *mut c_void,
-            Some(pam_data_cleanup::<T>),
-        ))
-        .to_result(())
+        let module_name = CString::new(module_name)?;
+        let data = Box::into_raw(Box::new(data)) as *mut c_void;
+        // SAFETY: `self.0` is the live PAM handle, `module_name` remains live
+        // for the synchronous call, and `data` owns one boxed `T` whose
+        // callback consumes it at most once after successful registration.
+        let status = PamError::new(unsafe {
+            pam_set_data(
+                self.0,
+                module_name.as_ptr(),
+                data,
+                Some(pam_data_cleanup::<T>),
+            )
+        });
+        // SAFETY: `data` is still the unique pointer returned by
+        // `Box::into_raw`; PAM owns it only when `status` is SUCCESS.
+        unsafe { finish_store::<T>(status, data) }
     }
 
     unsafe fn retrieve_data<T: PamData + Clone + Send>(&self, module_name: &str) -> PamResult<T> {
@@ -366,18 +354,35 @@ impl PamLibExt for Pam {
         .map(|ptr| (*ptr).clone()) // pam guaranties the data is valid when SUCCESS is returned.
     }
 
-    fn send_bytes(
-        &self,
-        module_name: &str,
-        data: Vec<u8>,
-        cb: Option<PamCleanupCb>,
-    ) -> PamResult<()> {
-        let data_cb = PamByteData { cb, data };
-        unsafe { self.send_data(module_name, data_cb) }
+    fn send_secret(&self, key: &str, value: PamSecretBytes) -> PamResult<()> {
+        let key = CString::new(key)?;
+        let data = Box::into_raw(Box::new(value)) as *mut c_void;
+        // SAFETY: `self.0` is the live PAM handle, `key` remains live for the
+        // synchronous call, `data` owns one boxed secret, and the callback
+        // consumes that pointer at most once after successful registration.
+        let status = unsafe {
+            PamError::new(pam_set_data(
+                self.0,
+                key.as_ptr(),
+                data,
+                Some(pam_secret_cleanup),
+            ))
+        };
+        // SAFETY: `data` is still the unique pointer returned by
+        // `Box::into_raw`; PAM owns it only when `status` is SUCCESS.
+        unsafe { finish_store::<PamSecretBytes>(status, data) }
     }
 
-    fn retrieve_bytes(&self, module_name: &str) -> PamResult<Vec<u8>> {
-        unsafe { self.retrieve_data::<PamByteData>(module_name) }.map(|data_cb| data_cb.data)
+    unsafe fn get_secret<'a>(&'a self, key: &str) -> PamResult<&'a PamSecretBytes> {
+        let key = CString::new(key)?;
+        let mut data: *const c_void = ptr::null();
+        // SAFETY: `self.0` is the live PAM handle, `key` is a valid C string,
+        // and `data` points to writable output storage for the duration of the
+        // synchronous call.
+        let status = PamError::new(unsafe { pam_get_data(self.0, key.as_ptr(), &mut data) });
+        // SAFETY: the caller guarantees that a successful, non-null result for
+        // `key` was registered by `send_secret` and remains live for `'a`.
+        unsafe { secret_from_data(status, data) }
     }
 
     fn syslog(&self, lvl: LogLvl, msg: &str) -> PamResult<()> {
@@ -390,16 +395,89 @@ impl PamLibExt for Pam {
     }
 }
 
-unsafe extern "C" fn pam_data_cleanup<T: PamData + Clone + Send>(
+/// Convert a `pam_set_data` result into the final ownership state.
+///
+/// # Safety
+///
+/// `data` must be the unique pointer returned by `Box::into_raw` for one live
+/// `T`. On success PAM must have accepted ownership; on error PAM must not
+/// retain or clean the pointer.
+unsafe fn finish_store<T>(status: PamError, data: *mut c_void) -> PamResult<()> {
+    if status == PamError::SUCCESS {
+        Ok(())
+    } else {
+        // SAFETY: the caller guarantees PAM did not accept ownership on error,
+        // so this remains the unique live pointer for one boxed `T`.
+        unsafe { cleanup_boxed::<T>(data, status as c_int) };
+        Err(status)
+    }
+}
+
+/// Convert a checked `pam_get_data` output into a secret borrow.
+///
+/// # Safety
+///
+/// For a successful non-null result, `data` must point to a live
+/// `PamSecretBytes` that remains immutable for `'a`.
+unsafe fn secret_from_data<'a>(
+    status: PamError,
+    data: *const c_void,
+) -> PamResult<&'a PamSecretBytes> {
+    if status != PamError::SUCCESS {
+        return Err(status);
+    }
+    if data.is_null() {
+        return Err(PamError::SYSTEM_ERR);
+    }
+    // SAFETY: the caller guarantees a successful non-null output names one
+    // live, immutable `PamSecretBytes` for the returned lifetime.
+    Ok(unsafe { &*(data as *const PamSecretBytes) })
+}
+
+unsafe extern "C" fn pam_secret_cleanup(
+    _handle: PamHandle,
+    data: *mut c_void,
+    error_status: c_int,
+) {
+    // SAFETY: Linux-PAM calls the registered cleanup at most once with the
+    // exact boxed `PamSecretBytes` pointer accepted by `pam_set_data`; null is
+    // handled defensively by `cleanup_boxed`.
+    unsafe { cleanup_boxed::<PamSecretBytes>(data, error_status) };
+}
+
+/// Run a `PamData` observer and release its allocation without unwinding.
+///
+/// # Safety
+///
+/// When non-null, `data` must be the unique pointer returned by
+/// `Box::into_raw` for one live `T`, and this function must be called exactly
+/// once for that pointer. `handle` must satisfy the observer's own PAM usage.
+unsafe fn cleanup_pam_data<T: PamData>(handle: PamHandle, data: *mut c_void, error_status: c_int) {
+    if data.is_null() {
+        return;
+    }
+
+    contain_cleanup(|| {
+        // SAFETY: the caller guarantees `data` is the unique pointer for one
+        // live boxed `T` and that this cleanup occurs exactly once.
+        let data = unsafe { Box::from_raw(data as *mut T) };
+        data.cleanup(
+            Pam::from_handle(handle),
+            PamFlags::from_bits_truncate(error_status),
+            PamError::new(error_status & 0xff),
+        );
+    });
+}
+
+unsafe extern "C" fn pam_data_cleanup<T: PamData>(
     handle: PamHandle,
     data: *mut c_void,
     error_status: c_int,
 ) {
-    Box::from_raw(data as *mut T).cleanup(
-        Pam::from_handle(handle),
-        PamFlags::from_bits_truncate(error_status),
-        PamError::new(error_status & 0xff),
-    );
+    // SAFETY: Linux-PAM calls the registered cleanup at most once with the
+    // exact boxed `T` pointer accepted by `pam_set_data`; null is handled
+    // defensively by `cleanup_pam_data`.
+    unsafe { cleanup_pam_data::<T>(handle, data, error_status) };
 }
 
 unsafe fn set_item(pamh: PamHandle, item_type: PamItemType, item: *const c_void) -> PamResult<()> {
@@ -448,6 +526,64 @@ extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PamSecretBytes;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct DropProbe(Arc<AtomicUsize>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct PamDataProbe {
+        cleanup_calls: Arc<AtomicUsize>,
+        replacement_calls: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+        panic_payload_in_cleanup: bool,
+    }
+
+    impl PamData for PamDataProbe {
+        fn cleanup(&self, _pam: Pam, flags: PamFlags, _status: PamError) {
+            self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
+            if flags.contains(PamFlags::DATA_REPLACE) {
+                self.replacement_calls.fetch_add(1, Ordering::SeqCst);
+            }
+            if self.panic_payload_in_cleanup {
+                struct PanicsOnDrop;
+
+                impl Drop for PanicsOnDrop {
+                    fn drop(&mut self) {
+                        panic!("intentional cleanup panic-payload drop");
+                    }
+                }
+
+                std::panic::resume_unwind(Box::new(PanicsOnDrop));
+            }
+        }
+    }
+
+    impl Drop for PamDataProbe {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn boxed_pam_data_probe(
+        cleanup_calls: Arc<AtomicUsize>,
+        replacement_calls: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+        panic_payload_in_cleanup: bool,
+    ) -> *mut c_void {
+        Box::into_raw(Box::new(PamDataProbe {
+            cleanup_calls,
+            replacement_calls,
+            drops,
+            panic_payload_in_cleanup,
+        })) as *mut c_void
+    }
 
     #[test]
     fn irlume_boundary_exposes_clear_and_response_free_info() {
@@ -460,5 +596,117 @@ mod tests {
 
         let _: fn(&Pam) -> PamResult<()> = require_clear;
         let _: fn(&Pam) -> PamResult<()> = require_info;
+    }
+
+    #[test]
+    fn secret_storage_api_has_owned_send_and_borrowed_get() {
+        fn require_send(pam: &Pam, key: &str, value: PamSecretBytes) -> PamResult<()> {
+            pam.send_secret(key, value)
+        }
+        unsafe fn require_get<'a>(pam: &'a Pam, key: &str) -> PamResult<&'a PamSecretBytes> {
+            pam.get_secret(key)
+        }
+
+        let _: fn(&Pam, &str, PamSecretBytes) -> PamResult<()> = require_send;
+        let _ = require_get;
+    }
+
+    #[test]
+    fn failed_storage_reclaims_transferred_ownership_once() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let data = Box::into_raw(Box::new(DropProbe(Arc::clone(&drops)))) as *mut c_void;
+
+        // SAFETY: `data` is one live `DropProbe` allocation transferred to
+        // this ownership-result seam exactly once.
+        let result = unsafe { finish_store::<DropProbe>(PamError::SYSTEM_ERR, data) };
+
+        assert_eq!(result, Err(PamError::SYSTEM_ERR));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn successful_storage_leaves_ownership_with_pam() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let data = Box::into_raw(Box::new(DropProbe(Arc::clone(&drops)))) as *mut c_void;
+
+        // SAFETY: `data` is one live `DropProbe`; success transfers ownership
+        // to PAM, then the test invokes its cleanup exactly once.
+        let result = unsafe { finish_store::<DropProbe>(PamError::SUCCESS, data) };
+        assert_eq!(result, Ok(()));
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        unsafe { crate::module_data::cleanup_boxed::<DropProbe>(data, 0) };
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn secret_lookup_checks_status_and_null_before_borrowing() {
+        let invalid = ptr::NonNull::<u8>::dangling().as_ptr() as *const c_void;
+
+        // SAFETY: an error status must return before inspecting `invalid`.
+        let error = unsafe { secret_from_data(PamError::NO_MODULE_DATA, invalid) };
+        assert!(matches!(error, Err(PamError::NO_MODULE_DATA)));
+
+        // SAFETY: a null success output must be rejected before dereference.
+        let missing = unsafe { secret_from_data(PamError::SUCCESS, ptr::null()) };
+        assert!(matches!(missing, Err(PamError::SYSTEM_ERR)));
+
+        let secret = Box::new(PamSecretBytes::new(b"fixed-ci-dummy".to_vec()));
+        // SAFETY: the pointer names `secret`, which remains live and immutable
+        // for the duration of the returned borrow.
+        let borrowed = unsafe {
+            secret_from_data(
+                PamError::SUCCESS,
+                &*secret as *const PamSecretBytes as *const c_void,
+            )
+        }
+        .expect("valid secret pointer");
+        assert!(borrowed.expose() == b"fixed-ci-dummy");
+    }
+
+    #[test]
+    fn pam_data_cleanup_observes_end_and_replacement_then_drops_once() {
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        let replacement_calls = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+
+        for status in [0, PamFlags::DATA_REPLACE.bits()] {
+            let data = boxed_pam_data_probe(
+                Arc::clone(&cleanup_calls),
+                Arc::clone(&replacement_calls),
+                Arc::clone(&drops),
+                false,
+            );
+            // SAFETY: each pointer names one live `PamDataProbe`, is passed
+            // exactly once, and the observer never reads the null PAM handle.
+            unsafe { cleanup_pam_data::<PamDataProbe>(ptr::null_mut(), data, status) };
+        }
+
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(replacement_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn pam_data_cleanup_ignores_null_and_contains_observer_panics() {
+        // SAFETY: null data is explicitly supported as a defensive no-op.
+        unsafe { cleanup_pam_data::<PamDataProbe>(ptr::null_mut(), ptr::null_mut(), 0) };
+
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        let replacement_calls = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let data = boxed_pam_data_probe(
+            Arc::clone(&cleanup_calls),
+            Arc::clone(&replacement_calls),
+            Arc::clone(&drops),
+            true,
+        );
+
+        // SAFETY: `data` names one live `PamDataProbe`, is passed exactly
+        // once, and the observer never reads the null PAM handle.
+        unsafe { cleanup_pam_data::<PamDataProbe>(ptr::null_mut(), data, 0) };
+
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(replacement_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 }

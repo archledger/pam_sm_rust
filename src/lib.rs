@@ -28,17 +28,20 @@
 //! ```
 #[macro_use]
 extern crate bitflags;
+extern crate zeroize;
 
 #[doc(hidden)]
 pub mod entrypoint;
 #[cfg(feature = "libpam")]
 mod libpam;
+mod module_data;
 mod pam;
 mod pam_types;
 
+pub use module_data::PamSecretBytes;
 pub use pam::{Pam, PamError, PamFlags, PamServiceModule};
 
 #[cfg(feature = "libpam")]
-pub use libpam::{PamCleanupCb, PamData, PamLibExt, PamResult};
+pub use libpam::{PamData, PamLibExt, PamResult};
 #[cfg(feature = "libpam")]
 pub use pam_types::{LogLvl, PamMsgStyle};

@@ -27,6 +27,7 @@ impl Pam {
         Self(handle.as_ptr(), PhantomData)
     }
 
+    #[cfg(feature = "libpam")]
     pub(crate) fn from_handle(handle: PamHandle) -> Self {
         Self(handle, PhantomData)
     }

@@ -2,9 +2,10 @@
 extern crate pamsm;
 extern crate rand;
 
-use pamsm::{LogLvl, Pam, PamData, PamError, PamFlags, PamLibExt, PamServiceModule};
+use pamsm::{
+    LogLvl, Pam, PamData, PamError, PamFlags, PamLibExt, PamSecretBytes, PamServiceModule,
+};
 use rand::RngCore;
-use std::fs::write;
 use std::time::Instant;
 
 struct PamTime;
@@ -30,7 +31,8 @@ impl PamData for SessionStart {
 
 impl PamServiceModule for PamTime {
     fn open_session(pamh: Pam, _flags: PamFlags, _args: Vec<String>) -> PamError {
-        pamh.syslog(LogLvl::WARNING, "hehe coucou %s %s").expect("Failed to send syslog");
+        pamh.syslog(LogLvl::WARNING, "hehe coucou %s %s")
+            .expect("Failed to send syslog");
         let now = SessionStart(Instant::now());
         if let Err(e) = unsafe { pamh.send_data("pamtime", now) } {
             return e;
@@ -38,15 +40,7 @@ impl PamServiceModule for PamTime {
 
         let mut token = vec![0u8; 32];
         rand::thread_rng().fill_bytes(&mut token);
-        let res = pamh.send_bytes(
-            "pamtime_token",
-            token,
-            Some(|token, _, _, _| {
-                if let Err(e) = write(".token.bin", token) {
-                    println!("Error persisting token : {:?}", e);
-                }
-            }),
-        );
+        let res = pamh.send_secret("pamtime_token", PamSecretBytes::new(token));
 
         if let Err(e) = res {
             return e;
