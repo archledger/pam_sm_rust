@@ -82,7 +82,7 @@ fn assert_env_and_items(pamh: &Pam, hook: &'static str) -> PamError {
         }
     };
     if env_value != EXPECTED_ENV_VALUE {
-        log_context(&format!("failure:{hook}:env-mismatch:{}", env_value));
+        log_context(&format!("failure:{hook}:env-mismatch:{env_value}"));
         return PamError::SERVICE_ERR;
     }
 

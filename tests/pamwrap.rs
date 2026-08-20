@@ -74,13 +74,7 @@ or set PAM_WRAPPER_SO)"
         .unwrap();
     }
 
-    fn run(
-        &self,
-        service: &str,
-        op: &str,
-        username: &str,
-        env_token: Option<&str>,
-    ) -> (bool, String) {
+    fn run(&self, service: &str, op: &str, username: &str) -> (bool, String) {
         fs::create_dir_all(&self.logs_root).unwrap();
         let mut cmd = Command::new("pamtester");
         cmd.arg("-I").arg("rhost=127.0.0.1");
@@ -90,16 +84,8 @@ or set PAM_WRAPPER_SO)"
         cmd.env("PAM_WRAPPER_SERVICE_DIR", &self.service_dir);
         cmd.env("PAMSM_TEST", EXPECTED_ENV_VALUE);
         cmd.env("PAMSM_TEST_LOG_DIR", &self.logs_root);
-        cmd.env("PAMSM_TEST_CASE", format!("{}:{op}", username));
-
-        match env_token {
-            Some(token) => {
-                cmd.env("PAM_AUTHTOK", token);
-            }
-            None => {
-                cmd.env_remove("PAM_AUTHTOK");
-            }
-        }
+        cmd.env("PAMSM_TEST_CASE", format!("{username}:{op}"));
+        cmd.env_remove("PAM_AUTHTOK");
 
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -241,7 +227,7 @@ fn run_for_op(op: &str, user: &str) -> Option<(bool, String, String)> {
     let h = Harness::try_new(op)?;
     let service = format!("pamsm-{op}");
     h.write_service(&service, &h.service_lines());
-    let (ok, out) = h.run(&service, op, user, None);
+    let (ok, out) = h.run(&service, op, user);
     let trace = read_trace(&h);
     Some((ok, out, trace))
 }

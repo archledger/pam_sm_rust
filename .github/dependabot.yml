@@ -1,0 +1,16 @@
+# Dependabot keeps Cargo dependencies and pinned Actions current.
+# Every update must pass the complete required-check set; automerge is
+# disabled at this authentication boundary.
+
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    target-branch: irlume-patches
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    target-branch: irlume-patches

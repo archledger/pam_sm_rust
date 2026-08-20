@@ -148,6 +148,60 @@ installed Linux-PAM 1.7.2 headers.
   null, valid output, status propagation, handle mutability, and cleanup flags
   with focused tests.
 
+### Real PAM integration and exported symbols
+
+Fork commits `test: add PAM wrapper integration for all PAM hooks` and the
+fixture/symbol audit it introduced.
+
+- Build a test-only `cdylib` from the fork exercising all six `pam_sm_*`
+  entrypoints and the hardened wrappers, and run it through pam_wrapper plus
+  pamtester with per-case generated service files under a private temporary
+  directory.
+- Audit exported symbols with `nm -D --defined-only`: the fixture must export
+  exactly the six `pam_sm_*` names and nothing else.
+- Fixed dummy token `fixed-ci-dummy` only; captured output, debug formatting,
+  and retained artifacts must never contain it. The CI job fails if it
+  appears in captured harness logs.
+- The pam_wrapper lane runs serially (`--test-threads=1`) because PAM
+  process-global state is shared.
+
+### Governance, CI, sanitizers, and workflow security
+
+Fork commits `ci: replace travis with GitHub Actions and refresh readme` through
+the governance checkpoint; superseded the interim soft-gated CI.
+
+- Replace the inherited Travis CI with GitHub Actions. Eight required check
+  names: `fmt · clippy · build · test`, `pam_wrapper integration`,
+  `AddressSanitizer (test suite)`, `Analyze (rust)`,
+  `cargo-deny (advisories · licenses · sources)`,
+  `actionlint (workflow correctness)`, `zizmor (workflow security)`, and
+  `DCO (exactly one trailer)`.
+- SHA-pin every action, disable persisted checkout credentials, keep default
+  permissions at `contents: read`, and run MSRV 1.88.0 alongside stable.
+  The pam_wrapper lane is a hard gate (no `continue-on-error`).
+- `tests/workflow_contract.sh` statically enforces the pin/permission/check
+  name/MSRV/sanitizer/no-publication rules on every change.
+- Declare `rust-version = "1.88"` and `edition = "2021"`; align `.clippy.toml`
+  msrv to 1.88; drop the advisory-laden `time` 0.2 dev-dependency and rewrite
+  the crate doc example without it. Edition 2021 required `crate::`-qualified
+  internal imports, C-string literals in the prompt helpers, and inlined
+  format args in tests; both Rust 1.88.0 and current stable clippy run clean.
+- Remove the unused `env_token` harness parameter; document the fail-closed
+  `Ok(None)`-never-produced `get_user` semantics on the trait.
+- `SECURITY.md` (private vulnerability reporting scope),
+  `CONTRIBUTING.md` (PR flow, signed+DCO, no publication), `deny.toml`,
+  CODEOWNERS, dependabot, actionlint config, and the zizmor lane.
+- `Cargo.lock` remains untracked (upstream convention); the readme no longer
+  instructs `--locked`.
+
+### History integrity repair
+
+- Rebuilt the downstream range on top of upstream `a51131eb` so every commit
+  is GPG-signed and carries exactly one `Signed-off-by` trailer; the resulting
+  tree is byte-identical to the previously pushed tree (verified by empty
+  `git diff` before the force-push). Done before any consumer pinned the
+  branch or tag existed.
+
 ## Updating from upstream
 
 1. Fetch the original `master` into the fork's `master` without downstream

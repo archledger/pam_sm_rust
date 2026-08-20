@@ -124,7 +124,7 @@ mod tests {
         assert_eq!(secret.len(), 14);
         assert!(!secret.is_empty());
         assert_eq!(
-            format!("{:?}", secret),
+            format!("{secret:?}"),
             "PamSecretBytes([redacted; 14 bytes])"
         );
     }

@@ -3,7 +3,7 @@
 #![allow(non_camel_case_types)]
 #![allow(clippy::upper_case_acronyms)]
 
-use pam_types::PamHandle;
+use crate::pam_types::PamHandle;
 use std::fmt;
 use std::marker::PhantomData;
 use std::os::raw::{c_int, c_void};
@@ -50,7 +50,7 @@ bitflags! {
 
 impl fmt::Display for PamError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{self:?}")
     }
 }
 

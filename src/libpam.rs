@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
-use module_data::{cleanup_boxed, contain_cleanup, PamSecretBytes};
-use pam::{Pam, PamError, PamFlags};
-use pam_types::{LogLvl, PamConstHandle, PamHandle, PamItemType, PamMsgStyle};
+use crate::module_data::{cleanup_boxed, contain_cleanup, PamSecretBytes};
+use crate::pam::{Pam, PamError, PamFlags};
+use crate::pam_types::{LogLvl, PamConstHandle, PamHandle, PamItemType, PamMsgStyle};
 use std::ffi::{CStr, CString, NulError};
 use std::ops::Deref;
 use std::option::Option;
@@ -246,7 +246,7 @@ unsafe fn info_with(
 /// `handle` must be live and `message` must point to a valid C string for the
 /// duration of the call.
 unsafe fn prompt_info(handle: PamHandle, message: *const c_char) -> c_int {
-    let format = b"%s\0".as_ptr() as *const c_char;
+    let format = c"%s".as_ptr();
     // SAFETY: the caller provides the live handle and valid message; TEXT_INFO
     // expects no response, and `format` consumes exactly one C-string argument.
     unsafe {
@@ -279,7 +279,9 @@ impl Pam {
 pub trait PamLibExt: private::Sealed {
     /// Get the username. If the PAM_USER item is not set, this function
     /// prompts for a username (like get_authtok).
-    /// Returns PamError::SERVICE_ERR if the prompt contains any null byte
+    /// Returns PamError::SERVICE_ERR if the prompt contains any null byte.
+    /// A successful PAM reply with no username is reported as
+    /// `PamError::SYSTEM_ERR` (fail-closed), so `Ok(None)` is not produced.
     fn get_user(&self, prompt: Option<&str>) -> PamResult<Option<&CStr>>;
 
     /// Get the username, i.e. the PAM_USER item. If it's not set return None.
@@ -565,7 +567,7 @@ impl PamLibExt for Pam {
     }
 
     fn syslog(&self, lvl: LogLvl, msg: &str) -> PamResult<()> {
-        let fmt = b"%s\0".as_ptr() as *const c_char;
+        let fmt = c"%s".as_ptr();
         let cmsg = CString::new(msg)?;
         // SAFETY: `self.0` is the live PAM handle; `fmt` expects one C string;
         // and `cmsg` remains allocated for the synchronous call.
