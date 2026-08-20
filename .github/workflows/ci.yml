@@ -34,20 +34,20 @@ jobs:
           components: rustfmt, clippy
 
       - name: Build all targets
-        run: cargo build --all-targets --locked
+        run: cargo build --all-targets
 
       - name: Format check
         run: cargo fmt --all -- --check
 
       - name: Run full test suite
-        run: cargo test --all-targets --locked
+        run: cargo test --all-targets
 
       - name: Lint
         if: matrix.rust == 'stable'
-        run: cargo clippy --all-targets --all-features --locked -- -D warnings -A clippy::incompatible-msrv
+        run: cargo clippy --all-targets --all-features -- -D warnings -A clippy::incompatible-msrv
 
       - name: Build PAM test fixture module
-        run: cargo build --example test_module --features libpam --locked
+        run: cargo build --example test_module --features libpam
 
       - name: Verify PAM entrypoint symbol exports
         run: bash tests/symbols.sh
