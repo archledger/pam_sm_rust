@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use pam::{Pam, PamError, PamFlags};
-use pam_types::{LogLvl, PamConv, PamHandle, PamItemType, PamMessage, PamMsgStyle, PamResponse};
+use pam_types::{LogLvl, PamHandle, PamItemType, PamMsgStyle};
 use std::ffi::{CStr, CString, NulError};
 use std::ops::Deref;
 use std::option::Option;
@@ -125,6 +125,14 @@ pub trait PamLibExt: private::Sealed {
 
     fn set_authtok(&self, authtok: &CString) -> PamResult<()>;
 
+    /// Remove the cached authentication token from this PAM transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error reported by `pam_set_item` when PAM cannot clear the
+    /// token.
+    fn clear_authtok(&self) -> PamResult<()>;
+
     /// Get the remote hostname.
     fn get_rhost(&self) -> PamResult<Option<&CStr>>;
 
@@ -134,9 +142,13 @@ pub trait PamLibExt: private::Sealed {
     /// Get the service name.
     fn get_service(&self) -> PamResult<Option<&CStr>>;
 
-    /// Prompt the user for custom input.
-    /// Returns PamError::SERVICE_ERR if the prompt contains any null byte
-    fn conv(&self, prompt: Option<&str>, style: PamMsgStyle) -> PamResult<Option<&CStr>>;
+    /// Display an informational message through the PAM conversation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PamError::SERVICE_ERR`] if `message` contains a null byte, or
+    /// the error reported by `pam_prompt` when the conversation fails.
+    fn info(&self, message: &str) -> PamResult<()>;
 
     /// Get a variable from the pam environment list.
     fn getenv(&self, name: &str) -> PamResult<Option<&CStr>>;
@@ -274,6 +286,12 @@ impl PamLibExt for Pam {
         }
     }
 
+    fn clear_authtok(&self) -> PamResult<()> {
+        // SAFETY: `self.0` is the live handle supplied by libpam, AUTHTOK is a
+        // string item, and Linux-PAM defines a null item pointer as clearing it.
+        unsafe { set_item(self.0, PamItemType::AUTHTOK, ptr::null()) }
+    }
+
     fn get_rhost(&self) -> PamResult<Option<&CStr>> {
         self.get_cstr_item(PamItemType::RHOST)
     }
@@ -286,45 +304,21 @@ impl PamLibExt for Pam {
         self.get_cstr_item(PamItemType::SERVICE)
     }
 
-    fn conv(&self, prompt: Option<&str>, style: PamMsgStyle) -> PamResult<Option<&CStr>> {
-        let mut conv_pointer: *const c_void = ptr::null();
-        let r = unsafe {
-            PamError::new(pam_get_item(
+    fn info(&self, message: &str) -> PamResult<()> {
+        let message = CString::new(message)?;
+        let format = b"%s\0".as_ptr() as *const c_char;
+        // SAFETY: `self.0` is the live handle supplied by libpam; TEXT_INFO
+        // expects no response; `format` expects one C string; and `message`
+        // remains allocated for the duration of the synchronous call.
+        unsafe {
+            PamError::new(pam_prompt(
                 self.0,
-                PamItemType::CONV as c_int,
-                &mut conv_pointer,
+                PamMsgStyle::TEXT_INFO as c_int,
+                ptr::null_mut(),
+                format,
+                message.as_ptr(),
             ))
-        };
-
-        if r != PamError::SUCCESS {
-            return Err(r);
-        }
-
-        if conv_pointer.is_null() {
-            return Ok(None);
-        }
-
-        let conv = unsafe { &*(conv_pointer as *const PamConv) };
-        let mut resp_ptr: *mut PamResponse = ptr::null_mut();
-        let msg_cstr = CString::new(prompt.unwrap_or(""))?;
-        let msg = PamMessage {
-            msg_style: style,
-            msg: msg_cstr.as_ptr(),
-        };
-
-        match conv.cb.map(|cb| {
-            PamError::new(cb(
-                1,
-                &mut (&msg as *const PamMessage),
-                &mut resp_ptr,
-                conv.appdata_ptr,
-            ))
-        }) {
-            Some(PamError::SUCCESS) => {
-                Ok(unsafe { (*resp_ptr).resp }.map(|r| unsafe { CStr::from_ptr(r.as_ptr()) }))
-            }
-            Some(ret) => Err(ret),
-            None => Ok(None),
+            .to_result(())
         }
     }
 
@@ -440,6 +434,31 @@ extern "C" {
         authok_ptr: *mut *const c_char,
         prompt: *const c_char,
     ) -> c_int;
+    pub fn pam_prompt(
+        pamh: PamHandle,
+        style: c_int,
+        response: *mut *mut c_char,
+        format: *const c_char,
+        ...
+    ) -> c_int;
 
     pub fn pam_syslog(pamh: PamHandle, priority: c_int, fmt: *const c_char, ...) -> c_void;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn irlume_boundary_exposes_clear_and_response_free_info() {
+        fn require_clear(pam: &Pam) -> PamResult<()> {
+            pam.clear_authtok()
+        }
+        fn require_info(pam: &Pam) -> PamResult<()> {
+            pam.info("Type yes to use face authentication")
+        }
+
+        let _: fn(&Pam) -> PamResult<()> = require_clear;
+        let _: fn(&Pam) -> PamResult<()> = require_info;
+    }
 }
