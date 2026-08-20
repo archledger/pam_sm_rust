@@ -65,7 +65,7 @@ where
         }
         hook(
             Pam::from_non_null(handle),
-            PamFlags::from_bits_truncate(flags),
+            PamFlags::from_bits_retain(flags),
             args,
         ) as c_int
     }));

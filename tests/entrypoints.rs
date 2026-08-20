@@ -12,8 +12,12 @@ impl PamServiceModule for Hooks {
         PamError::SUCCESS
     }
 
-    fn setcred(_: Pam, _: PamFlags, _: Vec<String>) -> PamError {
-        PamError::IGNORE
+    fn setcred(_: Pam, flags: PamFlags, _: Vec<String>) -> PamError {
+        if flags.bits() & 0x4000_0000 != 0 {
+            PamError::SUCCESS
+        } else {
+            PamError::IGNORE
+        }
     }
 
     fn acct_mgmt(_: Pam, _: PamFlags, _: Vec<String>) -> PamError {
@@ -63,4 +67,15 @@ fn every_exported_entrypoint_uses_checked_dispatch() {
         let rejected = unsafe { entry(ptr::null_mut(), 0, 0, ptr::null()) };
         assert_eq!(rejected, PamError::ABORT as c_int);
     }
+}
+
+#[test]
+fn unknown_flag_bits_are_retained() {
+    let handle = ptr::NonNull::<u8>::dangling().as_ptr() as *mut c_void;
+
+    // SAFETY: the opaque handle is non-null; zero arguments require no argv
+    // array; the fixture hook ignores the handle.
+    let result = unsafe { pam_sm_setcred(handle, 0x4000_0000, 0, ptr::null()) };
+
+    assert_eq!(result, PamError::SUCCESS as c_int);
 }

@@ -396,7 +396,7 @@ unsafe extern "C" fn pam_data_cleanup<T: PamData + Clone + Send>(
     error_status: c_int,
 ) {
     Box::from_raw(data as *mut T).cleanup(
-        Pam(handle),
+        Pam::from_handle(handle),
         PamFlags::from_bits_truncate(error_status),
         PamError::new(error_status & 0xff),
     );

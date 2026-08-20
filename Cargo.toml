@@ -14,7 +14,7 @@ categories = ["os::unix-apis", "authentication", "api-bindings"]
 time = "^0.2"
 
 [dependencies]
-bitflags = "1.0"
+bitflags = "2"
 
 [features]
 libpam = []

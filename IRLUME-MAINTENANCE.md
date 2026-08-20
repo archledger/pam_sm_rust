@@ -72,6 +72,24 @@ The enclosing fork commit is named `fix: validate PAM entrypoint pointers`.
 - Cover the dispatcher with focused unit tests and all six macro-expanded
   entrypoints with an integration test.
 
+### Callback-scoped PAM handles and forward-compatible flags
+
+Design source:
+[irlume PR #503](https://github.com/archledger/irlume/pull/503), merged as
+[`8862672c7a9063f3fe648c15e91f48c7d4f6a031`](https://github.com/archledger/irlume/commit/8862672c7a9063f3fe648c15e91f48c7d4f6a031).
+The enclosing fork commit is named `refactor: confine PAM handles to callbacks`.
+
+- Remove `PamSendRef`, `Pam::as_send_ref`, and the manual `unsafe impl Send` so
+  a PAM transaction handle cannot escape its callback thread through the safe
+  public API.
+- Keep `Pam` compiler-derived `!Send + !Sync` with a private zero-sized marker;
+  this has no runtime storage cost and requires no unsafe auto-trait claim.
+- Upgrade to bitflags 2 while preserving `PamFlags`' prior standard traits.
+- Retain unknown PAM flag bits at the checked callback boundary so newer PAM
+  flags remain visible to downstream modules.
+- Cover callback-thread confinement with compile-fail documentation and verify
+  unknown-bit delivery through a macro-expanded PAM entrypoint.
+
 ## Updating from upstream
 
 1. Fetch the original `master` into the fork's `master` without downstream
