@@ -1,6 +1,7 @@
 # Dependabot keeps Cargo dependencies and pinned Actions current.
 # Every update must pass the complete required-check set; automerge is
-# disabled at this authentication boundary.
+# disabled at this authentication boundary. A seven-day cooldown avoids
+# pulling freshly published (potentially compromised) versions.
 
 version: 2
 updates:
@@ -8,9 +9,13 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     target-branch: irlume-patches
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     target-branch: irlume-patches
