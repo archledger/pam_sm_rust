@@ -43,6 +43,9 @@ jobs:
           toolchain: nightly
           components: rust-src
 
+      - name: Build the fixture cdylib for the explicit target
+        run: cargo +nightly build --example test_module --features libpam --target x86_64-unknown-linux-gnu
+
       - name: Run the full suite under ASan/LSan (explicit target and symbolizer)
         env:
           ASAN_OPTIONS: ${{ env.ASAN_OPTIONS }}:external_symbolizer_path=/usr/bin/llvm-symbolizer

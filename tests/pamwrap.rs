@@ -153,6 +153,9 @@ fn locate_module() -> Option<PathBuf> {
             candidates.push(deps.to_path_buf());
             if let Some(profile_dir) = deps.parent() {
                 candidates.push(profile_dir.to_path_buf());
+                // Under an explicit `--target <triple>` build the example
+                // cdylib lands in <target>/<triple>/<profile>/examples.
+                candidates.push(profile_dir.join("examples"));
             }
         }
     }
