@@ -46,6 +46,11 @@ jobs:
         if: matrix.rust == 'stable'
         run: cargo clippy --all-targets --all-features -- -D warnings -A clippy::incompatible-msrv
 
+      - name: Install libpam development headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpam0g-dev
+
       - name: Build PAM test fixture module
         run: cargo build --example test_module --features libpam
 
@@ -56,8 +61,6 @@ jobs:
         continue-on-error: true
         run: |
           if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends libpam0g-dev || true
             sudo apt-get install -y --no-install-recommends libpam-wrapper pamtester || true
           else
             echo "apt-get not available; skipping optional PAM wrapper test dependencies"
