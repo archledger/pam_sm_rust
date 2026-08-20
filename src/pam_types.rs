@@ -2,12 +2,10 @@
 #![allow(non_camel_case_types)]
 #![allow(clippy::upper_case_acronyms)]
 
-use pam::PamError;
-use std::option::Option;
-use std::os::raw::{c_char, c_int, c_void};
-use std::ptr::NonNull;
+use std::os::raw::c_void;
 
-pub type PamHandle = *const c_void;
+pub type PamHandle = *mut c_void;
+pub type PamConstHandle = *const c_void;
 
 #[repr(C)]
 pub enum PamMsgStyle {
@@ -19,31 +17,6 @@ pub enum PamMsgStyle {
     PAM_MAX_NUM_MSG = 32,
     PAM_RADIO_TYPE = 5, /* yes/no/maybe conditionals */
     PAM_BINARY_PROMPT = 7,
-}
-
-#[repr(C)]
-pub struct PamMessage {
-    pub msg_style: PamMsgStyle,
-    pub msg: *const c_char,
-}
-
-#[repr(C)]
-pub struct PamResponse {
-    pub resp: Option<NonNull<c_char>>,
-    pub resp_retcode: PamError,
-}
-
-pub(crate) type PamConvCallback = extern "C" fn(
-    num_msg: c_int,
-    msg: *mut *const PamMessage,
-    resp: *mut *mut PamResponse,
-    appdata_ptr: *mut c_void,
-) -> c_int;
-
-#[repr(C)]
-pub(crate) struct PamConv {
-    pub(crate) cb: Option<PamConvCallback>,
-    pub(crate) appdata_ptr: *mut c_void,
 }
 
 #[repr(C)]
@@ -73,4 +46,17 @@ pub enum PamItemType {
     XDISPLAY = 11,     /* X display name */
     XAUTHDATA = 12,    /* X server authentication data */
     AUTHTOK_TYPE = 13, /* The type for pam_get_authtok */
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pam_handle_matches_mutable_opaque_c_pointer() {
+        fn require_mutable(_: *mut c_void) {}
+
+        let handle: PamHandle = std::ptr::null_mut();
+        require_mutable(handle);
+    }
 }

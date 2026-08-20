@@ -37,6 +37,7 @@ bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct PamFlags : c_int {
         const DATA_REPLACE = 0x2000_0000;
+        const DATA_SILENT = 0x4000_0000;
         const SILENT = 0x8000;
         const DISALLOW_NULL_AUTHTOK = 0x0001;
         const ESTABLISH_CRED = 0x0002;

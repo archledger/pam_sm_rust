@@ -2,7 +2,7 @@
 
 use module_data::{cleanup_boxed, contain_cleanup, PamSecretBytes};
 use pam::{Pam, PamError, PamFlags};
-use pam_types::{LogLvl, PamHandle, PamItemType, PamMsgStyle};
+use pam_types::{LogLvl, PamConstHandle, PamHandle, PamItemType, PamMsgStyle};
 use std::ffi::{CStr, CString, NulError};
 use std::ops::Deref;
 use std::option::Option;
@@ -27,7 +27,7 @@ pub type PamResult<T> = Result<T, PamError>;
 ///             match write(".token.bin", self.0) {
 ///                 Ok(_) => (),
 ///                 Err(err) => {
-///                     if !flags.contains(PamFlags::SILENT) {
+///                     if !flags.contains(PamFlags::DATA_SILENT) {
 ///                         println!("Error persisting token : {:?}", err);
 ///                     }
 ///                 }
@@ -68,6 +68,198 @@ mod private {
     impl Sealed for super::Pam {}
 }
 
+struct PamApi {
+    get_item: unsafe extern "C" fn(PamConstHandle, c_int, *mut *const c_void) -> c_int,
+    get_user: unsafe extern "C" fn(PamHandle, *mut *const c_char, *const c_char) -> c_int,
+    get_authtok: unsafe extern "C" fn(PamHandle, c_int, *mut *const c_char, *const c_char) -> c_int,
+    set_item: unsafe extern "C" fn(PamHandle, c_int, *const c_void) -> c_int,
+    putenv: unsafe extern "C" fn(PamHandle, *const c_char) -> c_int,
+}
+
+const PAM_API: PamApi = PamApi {
+    get_item: ffi::pam_get_item,
+    get_user: ffi::pam_get_user,
+    get_authtok: ffi::pam_get_authtok,
+    set_item: ffi::pam_set_item,
+    putenv: ffi::pam_putenv,
+};
+
+/// Retrieve an optional C-string item through one PAM API table.
+///
+/// # Safety
+///
+/// `handle` must be a live PAM handle accepted by `api`; on success, a
+/// non-null output must remain a valid C string for `'a`.
+unsafe fn get_item_with<'a>(
+    api: &PamApi,
+    handle: PamHandle,
+    item_type: PamItemType,
+) -> PamResult<Option<&'a CStr>> {
+    let mut output: *const c_void = ptr::null();
+    // SAFETY: the caller provides the live handle required by `api`, and
+    // `output` is writable for the duration of this synchronous call.
+    let status = unsafe { (api.get_item)(handle, item_type as c_int, &mut output) };
+    let status = PamError::new(status);
+    if status != PamError::SUCCESS {
+        return Err(status);
+    }
+    if output.is_null() {
+        return Ok(None);
+    }
+    // SAFETY: the caller guarantees a successful non-null output remains a
+    // valid C string for the returned lifetime.
+    Ok(Some(unsafe { CStr::from_ptr(output as *const c_char) }))
+}
+
+/// Retrieve the required user output through one PAM API table.
+///
+/// # Safety
+///
+/// `handle` must be a live PAM handle accepted by `api`; on success, a
+/// non-null output must remain a valid C string for `'a`. `prompt` must be null
+/// or a valid C string for the duration of the call.
+unsafe fn get_user_with<'a>(
+    api: &PamApi,
+    handle: PamHandle,
+    prompt: *const c_char,
+) -> PamResult<&'a CStr> {
+    let mut output: *const c_char = ptr::null();
+    // SAFETY: the caller provides the live handle and valid optional prompt;
+    // `output` is writable for the duration of this synchronous call.
+    let status = unsafe { (api.get_user)(handle, &mut output, prompt) };
+    // SAFETY: the caller guarantees a successful non-null output remains a
+    // valid C string for the returned lifetime.
+    unsafe { required_cstr(status, output) }
+}
+
+/// Retrieve the required authentication-token output through one API table.
+///
+/// # Safety
+///
+/// `handle` must be a live PAM handle accepted by `api`; on success, a
+/// non-null output must remain a valid C string for `'a`. `prompt` must be null
+/// or a valid C string for the duration of the call.
+unsafe fn get_authtok_with<'a>(
+    api: &PamApi,
+    handle: PamHandle,
+    item_type: PamItemType,
+    prompt: *const c_char,
+) -> PamResult<&'a CStr> {
+    let mut output: *const c_char = ptr::null();
+    // SAFETY: the caller provides the live handle and valid optional prompt;
+    // `output` is writable for the duration of this synchronous call.
+    let status = unsafe { (api.get_authtok)(handle, item_type as c_int, &mut output, prompt) };
+    // SAFETY: the caller guarantees a successful non-null output remains a
+    // valid C string for the returned lifetime.
+    unsafe { required_cstr(status, output) }
+}
+
+/// Convert a required C-string output only after checking its PAM status.
+///
+/// # Safety
+///
+/// On success, a non-null `output` must remain a valid C string for `'a`.
+unsafe fn required_cstr<'a>(status: c_int, output: *const c_char) -> PamResult<&'a CStr> {
+    let status = PamError::new(status);
+    if status != PamError::SUCCESS {
+        return Err(status);
+    }
+    if output.is_null() {
+        return Err(PamError::SYSTEM_ERR);
+    }
+    // SAFETY: the caller guarantees a successful non-null output remains a
+    // valid C string for the returned lifetime.
+    Ok(unsafe { CStr::from_ptr(output) })
+}
+
+/// Convert a required typed output only after checking its PAM status.
+///
+/// # Safety
+///
+/// On success, a non-null `output` must point to a live immutable `T` for `'a`.
+unsafe fn required_data<'a, T>(status: c_int, output: *const c_void) -> PamResult<&'a T> {
+    let status = PamError::new(status);
+    if status != PamError::SUCCESS {
+        return Err(status);
+    }
+    if output.is_null() {
+        return Err(PamError::SYSTEM_ERR);
+    }
+    // SAFETY: the caller guarantees a successful non-null output points to a
+    // live immutable `T` for the returned lifetime.
+    Ok(unsafe { &*(output as *const T) })
+}
+
+/// Set one PAM item through an injected API table.
+///
+/// # Safety
+///
+/// `handle` and `item` must satisfy the selected PAM item's C contract.
+unsafe fn set_item_with(
+    api: &PamApi,
+    handle: PamHandle,
+    item_type: PamItemType,
+    item: *const c_void,
+) -> PamResult<()> {
+    // SAFETY: the caller provides the live handle and item pointer required by
+    // the selected item type.
+    let status = unsafe { (api.set_item)(handle, item_type as c_int, item) };
+    PamError::new(status).to_result(())
+}
+
+/// Mutate the PAM environment through an injected API table.
+///
+/// # Safety
+///
+/// `handle` must be live and `name_value` must point to a valid C string for
+/// the duration of the call.
+unsafe fn putenv_with(api: &PamApi, handle: PamHandle, name_value: *const c_char) -> PamResult<()> {
+    // SAFETY: the caller provides the live handle and valid C string required
+    // by `pam_putenv`.
+    let status = unsafe { (api.putenv)(handle, name_value) };
+    PamError::new(status).to_result(())
+}
+
+type PromptInfoFn = unsafe fn(PamHandle, *const c_char) -> c_int;
+
+/// Display response-free informational text through an injected helper.
+///
+/// # Safety
+///
+/// `handle` must be live and `message` must point to a valid C string for the
+/// duration of the call.
+unsafe fn info_with(
+    prompt: PromptInfoFn,
+    handle: PamHandle,
+    message: *const c_char,
+) -> PamResult<()> {
+    // SAFETY: the caller provides the live handle and valid C string required
+    // by the response-free prompt helper.
+    let status = unsafe { prompt(handle, message) };
+    PamError::new(status).to_result(())
+}
+
+/// Call Linux-PAM's variadic prompt only in response-free informational mode.
+///
+/// # Safety
+///
+/// `handle` must be live and `message` must point to a valid C string for the
+/// duration of the call.
+unsafe fn prompt_info(handle: PamHandle, message: *const c_char) -> c_int {
+    let format = b"%s\0".as_ptr() as *const c_char;
+    // SAFETY: the caller provides the live handle and valid message; TEXT_INFO
+    // expects no response, and `format` consumes exactly one C-string argument.
+    unsafe {
+        ffi::pam_prompt(
+            handle,
+            PamMsgStyle::TEXT_INFO as c_int,
+            ptr::null_mut(),
+            format,
+            message,
+        )
+    }
+}
+
 impl Pam {
     // End users should call the item specific methods
     fn get_cstr_item(&self, item_type: PamItemType) -> PamResult<Option<&CStr>> {
@@ -77,14 +269,9 @@ impl Pam {
             }
             _ => (),
         }
-        let mut raw_item: *const c_void = ptr::null();
-        let r = unsafe { PamError::new(pam_get_item(self.0, item_type as c_int, &mut raw_item)) };
-        if raw_item.is_null() {
-            r.to_result(None)
-        } else {
-            // pam should keep the underlying token allocated during the lifetime of the module
-            r.to_result(Some(unsafe { CStr::from_ptr(raw_item as *const c_char) }))
-        }
+        // SAFETY: `self.0` is the live handle supplied by Linux-PAM; supported
+        // string items remain allocated for the PAM transaction lifetime.
+        unsafe { get_item_with(&PAM_API, self.0, item_type) }
     }
 }
 
@@ -207,19 +394,15 @@ impl PamLibExt for Pam {
             None => None,
             Some(p) => Some(CString::new(p)?),
         };
-        let mut raw_user: *const c_char = ptr::null();
-        let r = unsafe {
-            PamError::new(pam_get_user(
+        // SAFETY: `self.0` is the live PAM handle; `cprompt` remains allocated
+        // for the synchronous call, and Linux-PAM owns the returned user.
+        unsafe {
+            get_user_with(
+                &PAM_API,
                 self.0,
-                &mut raw_user,
                 cprompt.as_ref().map_or(ptr::null(), |p| p.as_ptr()),
-            ))
-        };
-
-        if raw_user.is_null() {
-            r.to_result(None)
-        } else {
-            r.to_result(Some(unsafe { CStr::from_ptr(raw_user) }))
+            )
+            .map(Some)
         }
     }
 
@@ -240,26 +423,25 @@ impl PamLibExt for Pam {
             None => None,
             Some(p) => Some(CString::new(p)?),
         };
-        let mut raw_at: *const c_char = ptr::null();
-        let r = unsafe {
-            PamError::new(pam_get_authtok(
+        // SAFETY: `self.0` is the live PAM handle; `cprompt` remains allocated
+        // for the synchronous call, and Linux-PAM owns the returned token.
+        unsafe {
+            get_authtok_with(
+                &PAM_API,
                 self.0,
-                PamItemType::AUTHTOK as i32,
-                &mut raw_at,
+                PamItemType::AUTHTOK,
                 cprompt.as_ref().map_or(ptr::null(), |p| p.as_ptr()),
-            ))
-        };
-
-        if raw_at.is_null() {
-            r.to_result(None)
-        } else {
-            r.to_result(unsafe { Some(CStr::from_ptr(raw_at)) })
+            )
+            .map(Some)
         }
     }
 
     fn set_authtok(&self, authtok: &CString) -> PamResult<()> {
+        // SAFETY: `self.0` is the live PAM handle and `authtok` is a valid C
+        // string that remains allocated for the synchronous copy.
         unsafe {
-            set_item(
+            set_item_with(
+                &PAM_API,
                 self.0,
                 PamItemType::AUTHTOK,
                 authtok.as_ptr() as *const c_void,
@@ -270,7 +452,7 @@ impl PamLibExt for Pam {
     fn clear_authtok(&self) -> PamResult<()> {
         // SAFETY: `self.0` is the live handle supplied by libpam, AUTHTOK is a
         // string item, and Linux-PAM defines a null item pointer as clearing it.
-        unsafe { set_item(self.0, PamItemType::AUTHTOK, ptr::null()) }
+        unsafe { set_item_with(&PAM_API, self.0, PamItemType::AUTHTOK, ptr::null()) }
     }
 
     fn get_rhost(&self) -> PamResult<Option<&CStr>> {
@@ -287,36 +469,31 @@ impl PamLibExt for Pam {
 
     fn info(&self, message: &str) -> PamResult<()> {
         let message = CString::new(message)?;
-        let format = b"%s\0".as_ptr() as *const c_char;
-        // SAFETY: `self.0` is the live handle supplied by libpam; TEXT_INFO
-        // expects no response; `format` expects one C string; and `message`
-        // remains allocated for the duration of the synchronous call.
-        unsafe {
-            PamError::new(pam_prompt(
-                self.0,
-                PamMsgStyle::TEXT_INFO as c_int,
-                ptr::null_mut(),
-                format,
-                message.as_ptr(),
-            ))
-            .to_result(())
-        }
+        // SAFETY: `self.0` is the live handle supplied by Linux-PAM and
+        // `message` remains allocated for the synchronous call.
+        unsafe { info_with(prompt_info, self.0, message.as_ptr()) }
     }
 
     fn getenv(&self, name: &str) -> PamResult<Option<&CStr>> {
         let cname = CString::new(name)?;
-        let cenv = unsafe { pam_getenv(self.0, cname.as_ptr()) };
+        // SAFETY: `self.0` is the live PAM handle and `cname` remains
+        // allocated for the synchronous call.
+        let cenv = unsafe { ffi::pam_getenv(self.0, cname.as_ptr()) };
 
         if cenv.is_null() {
             Ok(None)
         } else {
+            // SAFETY: Linux-PAM returned a non-null environment string owned
+            // by the live PAM transaction.
             unsafe { Ok(Some(CStr::from_ptr(cenv))) }
         }
     }
 
     fn putenv(&self, name_value: &str) -> PamResult<()> {
         let cenv = CString::new(name_value)?;
-        unsafe { PamError::new(pam_putenv(self.0, cenv.as_ptr())).to_result(()) }
+        // SAFETY: `self.0` is the live PAM handle and `cenv` remains allocated
+        // for the synchronous call.
+        unsafe { putenv_with(&PAM_API, self.0, cenv.as_ptr()) }
     }
 
     unsafe fn send_data<T: PamData + Clone + Send>(
@@ -330,7 +507,7 @@ impl PamLibExt for Pam {
         // for the synchronous call, and `data` owns one boxed `T` whose
         // callback consumes it at most once after successful registration.
         let status = PamError::new(unsafe {
-            pam_set_data(
+            ffi::pam_set_data(
                 self.0,
                 module_name.as_ptr(),
                 data,
@@ -343,15 +520,17 @@ impl PamLibExt for Pam {
     }
 
     unsafe fn retrieve_data<T: PamData + Clone + Send>(&self, module_name: &str) -> PamResult<T> {
+        let module_name = CString::new(module_name)?;
         let mut data_ptr: *const c_void = ptr::null();
-        // pam_get_data should be safe as long as T is the type that what used in send_data.
-        PamError::new(pam_get_data(
-            self.0,
-            CString::new(module_name)?.as_ptr(),
-            &mut data_ptr,
-        ))
-        .to_result(data_ptr as *const T)
-        .map(|ptr| (*ptr).clone()) // pam guaranties the data is valid when SUCCESS is returned.
+        // SAFETY: `self.0` is the live PAM handle, `module_name` remains live
+        // for the synchronous call, and `data_ptr` is writable output storage.
+        let status = unsafe { ffi::pam_get_data(self.0, module_name.as_ptr(), &mut data_ptr) };
+        // SAFETY: the caller guarantees this key was registered as `T`; PAM
+        // owns that value for the transaction lifetime.
+        match unsafe { required_data::<T>(status, data_ptr) } {
+            Ok(data) => Ok(data.clone()),
+            Err(error) => Err(error),
+        }
     }
 
     fn send_secret(&self, key: &str, value: PamSecretBytes) -> PamResult<()> {
@@ -361,7 +540,7 @@ impl PamLibExt for Pam {
         // synchronous call, `data` owns one boxed secret, and the callback
         // consumes that pointer at most once after successful registration.
         let status = unsafe {
-            PamError::new(pam_set_data(
+            PamError::new(ffi::pam_set_data(
                 self.0,
                 key.as_ptr(),
                 data,
@@ -379,7 +558,7 @@ impl PamLibExt for Pam {
         // SAFETY: `self.0` is the live PAM handle, `key` is a valid C string,
         // and `data` points to writable output storage for the duration of the
         // synchronous call.
-        let status = PamError::new(unsafe { pam_get_data(self.0, key.as_ptr(), &mut data) });
+        let status = PamError::new(unsafe { ffi::pam_get_data(self.0, key.as_ptr(), &mut data) });
         // SAFETY: the caller guarantees that a successful, non-null result for
         // `key` was registered by `send_secret` and remains live for `'a`.
         unsafe { secret_from_data(status, data) }
@@ -388,8 +567,10 @@ impl PamLibExt for Pam {
     fn syslog(&self, lvl: LogLvl, msg: &str) -> PamResult<()> {
         let fmt = b"%s\0".as_ptr() as *const c_char;
         let cmsg = CString::new(msg)?;
+        // SAFETY: `self.0` is the live PAM handle; `fmt` expects one C string;
+        // and `cmsg` remains allocated for the synchronous call.
         unsafe {
-            pam_syslog(self.0, lvl as c_int, fmt, cmsg.as_ptr());
+            ffi::pam_syslog(self.0, lvl as c_int, fmt, cmsg.as_ptr());
         }
         Ok(())
     }
@@ -423,15 +604,9 @@ unsafe fn secret_from_data<'a>(
     status: PamError,
     data: *const c_void,
 ) -> PamResult<&'a PamSecretBytes> {
-    if status != PamError::SUCCESS {
-        return Err(status);
-    }
-    if data.is_null() {
-        return Err(PamError::SYSTEM_ERR);
-    }
     // SAFETY: the caller guarantees a successful non-null output names one
     // live, immutable `PamSecretBytes` for the returned lifetime.
-    Ok(unsafe { &*(data as *const PamSecretBytes) })
+    unsafe { required_data::<PamSecretBytes>(status as c_int, data) }
 }
 
 unsafe extern "C" fn pam_secret_cleanup(
@@ -444,6 +619,8 @@ unsafe extern "C" fn pam_secret_cleanup(
     // handled defensively by `cleanup_boxed`.
     unsafe { cleanup_boxed::<PamSecretBytes>(data, error_status) };
 }
+
+const PAM_STATUS_MASK: c_int = 0xff;
 
 /// Run a `PamData` observer and release its allocation without unwinding.
 ///
@@ -463,8 +640,8 @@ unsafe fn cleanup_pam_data<T: PamData>(handle: PamHandle, data: *mut c_void, err
         let data = unsafe { Box::from_raw(data as *mut T) };
         data.cleanup(
             Pam::from_handle(handle),
-            PamFlags::from_bits_truncate(error_status),
-            PamError::new(error_status & 0xff),
+            PamFlags::from_bits_retain(error_status & !PAM_STATUS_MASK),
+            PamError::new(error_status & PAM_STATUS_MASK),
         );
     });
 }
@@ -480,47 +657,55 @@ unsafe extern "C" fn pam_data_cleanup<T: PamData>(
     unsafe { cleanup_pam_data::<T>(handle, data, error_status) };
 }
 
-unsafe fn set_item(pamh: PamHandle, item_type: PamItemType, item: *const c_void) -> PamResult<()> {
-    PamError::new(pam_set_item(pamh, item_type as c_int, item)).to_result(())
-}
+mod ffi {
+    use super::{c_char, c_int, c_void, PamConstHandle, PamHandle};
 
-// Raw functions
-#[link(name = "pam")]
-extern "C" {
-    pub fn pam_set_item(pamh: PamHandle, item_type: c_int, item: *const c_void) -> c_int;
-    pub fn pam_get_item(pamh: PamHandle, item_type: c_int, item: *mut *const c_void) -> c_int;
-    pub fn pam_strerror(pamh: PamHandle, errnum: c_int) -> *const c_char;
-    pub fn pam_putenv(pamh: PamHandle, name_value: *const c_char) -> c_int;
-    pub fn pam_getenv(pamh: PamHandle, name: *const c_char) -> *const c_char;
-    pub fn pam_getenvlist(pamh: PamHandle) -> *mut *mut c_char;
+    #[link(name = "pam")]
+    // SAFETY: these declarations were compared with Linux-PAM 1.7.2's
+    // installed pam_modules.h, pam_ext.h, and _pam_types.h using bindgen 0.72.1.
+    unsafe extern "C" {
+        pub(super) fn pam_set_item(pamh: PamHandle, item_type: c_int, item: *const c_void)
+            -> c_int;
+        pub(super) fn pam_get_item(
+            pamh: PamConstHandle,
+            item_type: c_int,
+            item: *mut *const c_void,
+        ) -> c_int;
+        pub(super) fn pam_putenv(pamh: PamHandle, name_value: *const c_char) -> c_int;
+        pub(super) fn pam_getenv(pamh: PamHandle, name: *const c_char) -> *const c_char;
 
-    pub fn pam_set_data(
-        pamh: PamHandle,
-        module_data_name: *const c_char,
-        data: *mut c_void,
-        cleanup: Option<unsafe extern "C" fn(_: PamHandle, _: *mut c_void, _: c_int)>,
-    ) -> c_int;
-    pub fn pam_get_data(
-        pamh: PamHandle,
-        module_data_name: *const c_char,
-        data: *mut *const c_void,
-    ) -> c_int;
-    pub fn pam_get_user(pamh: PamHandle, user: *mut *const c_char, prompt: *const c_char) -> c_int;
-    pub fn pam_get_authtok(
-        pamh: PamHandle,
-        item: c_int,
-        authok_ptr: *mut *const c_char,
-        prompt: *const c_char,
-    ) -> c_int;
-    pub fn pam_prompt(
-        pamh: PamHandle,
-        style: c_int,
-        response: *mut *mut c_char,
-        format: *const c_char,
-        ...
-    ) -> c_int;
+        pub(super) fn pam_set_data(
+            pamh: PamHandle,
+            module_data_name: *const c_char,
+            data: *mut c_void,
+            cleanup: Option<unsafe extern "C" fn(PamHandle, *mut c_void, c_int)>,
+        ) -> c_int;
+        pub(super) fn pam_get_data(
+            pamh: PamConstHandle,
+            module_data_name: *const c_char,
+            data: *mut *const c_void,
+        ) -> c_int;
+        pub(super) fn pam_get_user(
+            pamh: PamHandle,
+            user: *mut *const c_char,
+            prompt: *const c_char,
+        ) -> c_int;
+        pub(super) fn pam_get_authtok(
+            pamh: PamHandle,
+            item: c_int,
+            authtok: *mut *const c_char,
+            prompt: *const c_char,
+        ) -> c_int;
+        pub(super) fn pam_prompt(
+            pamh: PamHandle,
+            style: c_int,
+            response: *mut *mut c_char,
+            format: *const c_char,
+            ...
+        ) -> c_int;
 
-    pub fn pam_syslog(pamh: PamHandle, priority: c_int, fmt: *const c_char, ...) -> c_void;
+        pub(super) fn pam_syslog(pamh: PamConstHandle, priority: c_int, format: *const c_char, ...);
+    }
 }
 
 #[cfg(test)]
@@ -529,6 +714,273 @@ mod tests {
     use crate::PamSecretBytes;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    static FFI_VALUE: &[u8] = b"ffi-value\0";
+
+    fn dangling_void() -> *const c_void {
+        ptr::NonNull::<u8>::dangling().as_ptr() as *const c_void
+    }
+
+    fn dangling_char() -> *const c_char {
+        ptr::NonNull::<u8>::dangling().as_ptr() as *const c_char
+    }
+
+    unsafe extern "C" fn get_item_error(
+        _handle: PamConstHandle,
+        _item_type: c_int,
+        output: *mut *const c_void,
+    ) -> c_int {
+        // SAFETY: the test wrapper supplies writable output storage.
+        unsafe { *output = dangling_void() };
+        PamError::AUTH_ERR as c_int
+    }
+
+    unsafe extern "C" fn get_item_null(
+        _handle: PamConstHandle,
+        _item_type: c_int,
+        output: *mut *const c_void,
+    ) -> c_int {
+        // SAFETY: the test wrapper supplies writable output storage.
+        unsafe { *output = ptr::null() };
+        PamError::SUCCESS as c_int
+    }
+
+    unsafe extern "C" fn get_item_value(
+        _handle: PamConstHandle,
+        _item_type: c_int,
+        output: *mut *const c_void,
+    ) -> c_int {
+        // SAFETY: the test wrapper supplies writable output storage, and the
+        // static C string outlives the returned borrow.
+        unsafe { *output = FFI_VALUE.as_ptr() as *const c_void };
+        PamError::SUCCESS as c_int
+    }
+
+    unsafe extern "C" fn get_char_error(
+        _handle: PamHandle,
+        output: *mut *const c_char,
+        _prompt: *const c_char,
+    ) -> c_int {
+        // SAFETY: the test wrapper supplies writable output storage.
+        unsafe { *output = dangling_char() };
+        PamError::AUTH_ERR as c_int
+    }
+
+    unsafe extern "C" fn get_char_null(
+        _handle: PamHandle,
+        output: *mut *const c_char,
+        _prompt: *const c_char,
+    ) -> c_int {
+        // SAFETY: the test wrapper supplies writable output storage.
+        unsafe { *output = ptr::null() };
+        PamError::SUCCESS as c_int
+    }
+
+    unsafe extern "C" fn get_char_value(
+        _handle: PamHandle,
+        output: *mut *const c_char,
+        _prompt: *const c_char,
+    ) -> c_int {
+        // SAFETY: the test wrapper supplies writable output storage, and the
+        // static C string outlives the returned borrow.
+        unsafe { *output = FFI_VALUE.as_ptr() as *const c_char };
+        PamError::SUCCESS as c_int
+    }
+
+    unsafe extern "C" fn get_authtok_error(
+        handle: PamHandle,
+        _item_type: c_int,
+        output: *mut *const c_char,
+        prompt: *const c_char,
+    ) -> c_int {
+        // SAFETY: this test stub has the same output contract as
+        // `get_char_error` and forwards the wrapper-provided pointers.
+        unsafe { get_char_error(handle, output, prompt) }
+    }
+
+    unsafe extern "C" fn get_authtok_null(
+        handle: PamHandle,
+        _item_type: c_int,
+        output: *mut *const c_char,
+        prompt: *const c_char,
+    ) -> c_int {
+        // SAFETY: this test stub has the same output contract as
+        // `get_char_null` and forwards the wrapper-provided pointers.
+        unsafe { get_char_null(handle, output, prompt) }
+    }
+
+    unsafe extern "C" fn get_authtok_value(
+        handle: PamHandle,
+        _item_type: c_int,
+        output: *mut *const c_char,
+        prompt: *const c_char,
+    ) -> c_int {
+        // SAFETY: this test stub has the same output contract as
+        // `get_char_value` and forwards the wrapper-provided pointers.
+        unsafe { get_char_value(handle, output, prompt) }
+    }
+
+    unsafe extern "C" fn set_item_success(
+        _handle: PamHandle,
+        _item_type: c_int,
+        _item: *const c_void,
+    ) -> c_int {
+        PamError::SUCCESS as c_int
+    }
+
+    unsafe extern "C" fn set_item_error(
+        _handle: PamHandle,
+        _item_type: c_int,
+        _item: *const c_void,
+    ) -> c_int {
+        PamError::BAD_ITEM as c_int
+    }
+
+    unsafe extern "C" fn putenv_success(_handle: PamHandle, _name_value: *const c_char) -> c_int {
+        PamError::SUCCESS as c_int
+    }
+
+    unsafe extern "C" fn putenv_error(_handle: PamHandle, _name_value: *const c_char) -> c_int {
+        PamError::BAD_ITEM as c_int
+    }
+
+    unsafe fn prompt_success(_handle: PamHandle, _message: *const c_char) -> c_int {
+        PamError::SUCCESS as c_int
+    }
+
+    unsafe fn prompt_error(_handle: PamHandle, _message: *const c_char) -> c_int {
+        PamError::CONV_ERR as c_int
+    }
+
+    const ERROR_API: PamApi = PamApi {
+        get_item: get_item_error,
+        get_user: get_char_error,
+        get_authtok: get_authtok_error,
+        set_item: set_item_error,
+        putenv: putenv_error,
+    };
+
+    const NULL_API: PamApi = PamApi {
+        get_item: get_item_null,
+        get_user: get_char_null,
+        get_authtok: get_authtok_null,
+        set_item: set_item_success,
+        putenv: putenv_success,
+    };
+
+    const VALUE_API: PamApi = PamApi {
+        get_item: get_item_value,
+        get_user: get_char_value,
+        get_authtok: get_authtok_value,
+        set_item: set_item_success,
+        putenv: putenv_success,
+    };
+
+    #[test]
+    fn ffi_contract_checks_status_before_output_and_rejects_required_nulls() {
+        let handle = ptr::NonNull::<u8>::dangling().as_ptr() as PamHandle;
+
+        // SAFETY: the injected stubs never dereference `handle`; their output
+        // pointers remain valid for each synchronous call.
+        unsafe {
+            assert!(matches!(
+                get_item_with(&ERROR_API, handle, PamItemType::USER),
+                Err(PamError::AUTH_ERR)
+            ));
+            assert!(matches!(
+                get_user_with(&ERROR_API, handle, ptr::null()),
+                Err(PamError::AUTH_ERR)
+            ));
+            assert!(matches!(
+                get_authtok_with(&ERROR_API, handle, PamItemType::AUTHTOK, ptr::null()),
+                Err(PamError::AUTH_ERR)
+            ));
+
+            assert!(matches!(
+                get_item_with(&NULL_API, handle, PamItemType::USER),
+                Ok(None)
+            ));
+            assert!(matches!(
+                get_user_with(&NULL_API, handle, ptr::null()),
+                Err(PamError::SYSTEM_ERR)
+            ));
+            assert!(matches!(
+                get_authtok_with(&NULL_API, handle, PamItemType::AUTHTOK, ptr::null()),
+                Err(PamError::SYSTEM_ERR)
+            ));
+
+            assert!(matches!(
+                set_item_with(&ERROR_API, handle, PamItemType::AUTHTOK, ptr::null()),
+                Err(PamError::BAD_ITEM)
+            ));
+            assert!(matches!(
+                putenv_with(&ERROR_API, handle, FFI_VALUE.as_ptr() as *const c_char),
+                Err(PamError::BAD_ITEM)
+            ));
+            assert!(matches!(
+                info_with(prompt_error, handle, FFI_VALUE.as_ptr() as *const c_char),
+                Err(PamError::CONV_ERR)
+            ));
+
+            let item = get_item_with(&VALUE_API, handle, PamItemType::USER)
+                .expect("value status")
+                .expect("value pointer");
+            assert_eq!(item.to_bytes(), b"ffi-value");
+            assert_eq!(
+                get_user_with(&VALUE_API, handle, ptr::null())
+                    .expect("user value")
+                    .to_bytes(),
+                b"ffi-value"
+            );
+            assert_eq!(
+                get_authtok_with(&VALUE_API, handle, PamItemType::AUTHTOK, ptr::null(),)
+                    .expect("token value")
+                    .to_bytes(),
+                b"ffi-value"
+            );
+            assert_eq!(
+                set_item_with(&VALUE_API, handle, PamItemType::AUTHTOK, ptr::null()),
+                Ok(())
+            );
+            assert_eq!(
+                putenv_with(&VALUE_API, handle, FFI_VALUE.as_ptr() as *const c_char),
+                Ok(())
+            );
+            assert_eq!(
+                info_with(prompt_success, handle, FFI_VALUE.as_ptr() as *const c_char),
+                Ok(())
+            );
+        }
+    }
+
+    #[test]
+    fn ffi_contract_required_data_checks_status_before_pointer() {
+        let invalid = dangling_void();
+
+        // SAFETY: the error case must return before inspecting `invalid`, and
+        // the null success case must return before dereference.
+        unsafe {
+            assert!(matches!(
+                required_data::<u8>(PamError::NO_MODULE_DATA as c_int, invalid),
+                Err(PamError::NO_MODULE_DATA)
+            ));
+            assert!(matches!(
+                required_data::<u8>(PamError::SUCCESS as c_int, ptr::null()),
+                Err(PamError::SYSTEM_ERR)
+            ));
+        }
+
+        let value = 42_u8;
+        // SAFETY: `value` remains live and immutable for the returned borrow.
+        let borrowed = unsafe {
+            required_data::<u8>(
+                PamError::SUCCESS as c_int,
+                &value as *const u8 as *const c_void,
+            )
+        }
+        .expect("valid data output");
+        assert_eq!(*borrowed, 42);
+    }
 
     struct DropProbe(Arc<AtomicUsize>);
 
@@ -571,6 +1023,32 @@ mod tests {
         }
     }
 
+    struct CleanupFlagProbe(Arc<AtomicUsize>);
+
+    impl PamData for CleanupFlagProbe {
+        fn cleanup(&self, _pam: Pam, flags: PamFlags, _status: PamError) {
+            if flags.bits() & 0x4000_0000 != 0 {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    struct CleanupStatusProbe {
+        saw_status: Arc<AtomicUsize>,
+        saw_low_flag_bits: Arc<AtomicUsize>,
+    }
+
+    impl PamData for CleanupStatusProbe {
+        fn cleanup(&self, _pam: Pam, flags: PamFlags, status: PamError) {
+            if status == PamError::AUTH_ERR {
+                self.saw_status.fetch_add(1, Ordering::SeqCst);
+            }
+            if flags.bits() & 0xff != 0 {
+                self.saw_low_flag_bits.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
     fn boxed_pam_data_probe(
         cleanup_calls: Arc<AtomicUsize>,
         replacement_calls: Arc<AtomicUsize>,
@@ -604,7 +1082,9 @@ mod tests {
             pam.send_secret(key, value)
         }
         unsafe fn require_get<'a>(pam: &'a Pam, key: &str) -> PamResult<&'a PamSecretBytes> {
-            pam.get_secret(key)
+            // SAFETY: this compile contract preserves the caller's documented
+            // requirement that `key` names a live stored secret.
+            unsafe { pam.get_secret(key) }
         }
 
         let _: fn(&Pam, &str, PamSecretBytes) -> PamResult<()> = require_send;
@@ -708,5 +1188,40 @@ mod tests {
         assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
         assert_eq!(replacement_calls.load(Ordering::SeqCst), 0);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn pam_data_cleanup_retains_the_data_silent_flag() {
+        let observed = Arc::new(AtomicUsize::new(0));
+        let data = Box::into_raw(Box::new(CleanupFlagProbe(Arc::clone(&observed)))) as *mut c_void;
+
+        // SAFETY: `data` names one live `CleanupFlagProbe`, is passed exactly
+        // once, and the observer never reads the null PAM handle.
+        unsafe { cleanup_pam_data::<CleanupFlagProbe>(ptr::null_mut(), data, 0x4000_0000) };
+
+        assert_eq!(observed.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn pam_data_cleanup_separates_status_from_flag_bits() {
+        let saw_status = Arc::new(AtomicUsize::new(0));
+        let saw_low_flag_bits = Arc::new(AtomicUsize::new(0));
+        let data = Box::into_raw(Box::new(CleanupStatusProbe {
+            saw_status: Arc::clone(&saw_status),
+            saw_low_flag_bits: Arc::clone(&saw_low_flag_bits),
+        })) as *mut c_void;
+
+        // SAFETY: `data` names one live `CleanupStatusProbe`, is passed exactly
+        // once, and the observer never reads the null PAM handle.
+        unsafe {
+            cleanup_pam_data::<CleanupStatusProbe>(
+                ptr::null_mut(),
+                data,
+                PamError::AUTH_ERR as c_int,
+            )
+        };
+
+        assert_eq!(saw_status.load(Ordering::SeqCst), 1);
+        assert_eq!(saw_low_flag_bits.load(Ordering::SeqCst), 0);
     }
 }

@@ -1,5 +1,9 @@
 // Copyright (C) 2016 Raphael Catolino
 
+#![deny(improper_ctypes)]
+#![deny(improper_ctypes_definitions)]
+#![deny(unsafe_op_in_unsafe_fn)]
+
 //! PAM Service Module wrappers
 //! # Usage
 //! For example, here is a time based authentication module :

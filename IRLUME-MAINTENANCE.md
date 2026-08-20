@@ -114,6 +114,40 @@ The enclosing fork commit is named `fix: zeroize PAM module secrets`.
   null/error retrieval, replacement/end cleanup, and panic containment with
   focused tests; migrate the example module to the secret API.
 
+### Audited Linux-PAM FFI and checked outputs
+
+Design source:
+[irlume PR #503](https://github.com/archledger/irlume/pull/503), merged as
+[`8862672c7a9063f3fe648c15e91f48c7d4f6a031`](https://github.com/archledger/irlume/commit/8862672c7a9063f3fe648c15e91f48c7d4f6a031).
+The enclosing fork commit is named `fix: validate Linux-PAM FFI outputs`.
+
+Declaration sources are Linux-PAM's official
+[`_pam_types.h`](https://github.com/linux-pam/linux-pam/blob/master/libpam/include/security/_pam_types.h),
+[`pam_modules.h`](https://github.com/linux-pam/linux-pam/blob/master/libpam/include/security/pam_modules.h),
+and
+[`pam_ext.h`](https://github.com/linux-pam/linux-pam/blob/master/libpam/include/security/pam_ext.h).
+The checked Rust signatures also matched bindgen 0.72.1 output from the locally
+installed Linux-PAM 1.7.2 headers.
+
+- Keep every raw symbol inside one private `ffi` module and expose only checked
+  `PamResult` wrappers.
+- Represent mutable and const opaque PAM handles separately, and declare
+  `pam_syslog` with its actual C `void` return.
+- Inspect return status before any output pointer. Preserve optional null PAM
+  items, but map successful missing user, authentication-token, and module-data
+  outputs to `PAM_SYSTEM_ERR`.
+- Inject `pam_get_item`, `pam_get_user`, `pam_get_authtok`, `pam_set_item`, and
+  `pam_putenv` through one private function table; keep the variadic
+  response-free `pam_prompt` behind a non-variadic helper.
+- Retain `PAM_DATA_SILENT` in cleanup flags, expose its named flag alongside
+  `PAM_DATA_REPLACE`, and keep the low PAM result byte out of the flag domain.
+- Remove unused conversation-layout types and unused raw declarations left
+  behind when the response-returning conversation API was retired.
+- Deny improper FFI types, improper FFI definitions, and implicit unsafe
+  operations inside unsafe functions; cover error-before-pointer, required
+  null, valid output, status propagation, handle mutability, and cleanup flags
+  with focused tests.
+
 ## Updating from upstream
 
 1. Fetch the original `master` into the fork's `master` without downstream
