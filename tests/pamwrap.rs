@@ -156,7 +156,12 @@ fn built_module() -> PathBuf {
         return path.canonicalize().unwrap_or(path);
     }
 
-    panic!("failed to locate libtest_module.so; run `cargo build --example test_module --features libpam` first");
+    panic!(
+        "failed to locate libtest_module.so; run `cargo build --example test_module --features libpam` first; \
+         current_exe={:?} manifest={:?}",
+        std::env::current_exe(),
+        env!("CARGO_MANIFEST_DIR")
+    );
 }
 
 fn locate_module() -> Option<PathBuf> {
@@ -194,6 +199,21 @@ fn locate_module() -> Option<PathBuf> {
     candidates.push(workspace.join("target").join("release").join("deps"));
     candidates.push(workspace.join("target").join("release"));
 
+    // Last resort: the freshly built example exists somewhere under the
+    // target directory regardless of profile/triple layout (including a
+    // CARGO_TARGET_DIR outside the workspace when it is absolute).
+    let mut search_roots: Vec<PathBuf> = Vec::new();
+    if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
+        let base = PathBuf::from(target_dir);
+        if base.is_absolute() {
+            search_roots.push(base);
+        }
+    }
+    search_roots.push(workspace.join("target"));
+    for root in search_roots {
+        candidates.extend(search_examples(&root));
+    }
+
     for dir in &candidates {
         if let Some(module) = find_module_in_dir(dir) {
             return Some(module);
@@ -201,6 +221,33 @@ fn locate_module() -> Option<PathBuf> {
     }
 
     None
+}
+
+/// Recursively collect directories that directly contain the built example,
+/// bounded in depth so a large target tree cannot stall discovery.
+fn search_examples(root: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
+        if depth == 0 {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for ent in entries.filter_map(Result::ok) {
+            let path = ent.path();
+            if path.is_dir() {
+                if path.join("libtest_module.so").is_file() {
+                    out.push(path.clone());
+                }
+                walk(&path, depth - 1, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if root.is_dir() {
+        walk(root, 4, &mut out);
+    }
+    out
 }
 
 fn find_module_in_dir(dir: &Path) -> Option<PathBuf> {
