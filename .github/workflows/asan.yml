@@ -35,13 +35,25 @@ jobs:
       - name: Install libpam headers and the LLVM symbolizer
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libpam0g-dev libpam-wrapper pamtester llvm
+          sudo apt-get install -y --no-install-recommends libpam0g-dev libpam-wrapper pamtester llvm clang
 
       - name: Install nightly Rust (-Zsanitizer is unstable)
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: nightly
           components: rust-src
+
+      - name: Locate the ASan runtime for the uninstrumented pamtester host
+        run: |
+          set -euo pipefail
+          rt=$(find /usr/lib/llvm* /usr/lib/clang* /usr/lib*/clang* \
+            -name 'libclang_rt.asan*.so' -o -name 'libasan.so.*' 2>/dev/null \
+            | sort -V | tail -1)
+          if [ -z "$rt" ]; then
+            echo 'no ASan runtime found for LD_PRELOAD' >&2
+            exit 1
+          fi
+          echo "PAMSM_TEST_PREPEND_PRELOAD=$rt" >> "$GITHUB_ENV"
 
       - name: Build the fixture cdylib for the explicit target
         run: cargo +nightly build --example test_module --features libpam --target x86_64-unknown-linux-gnu

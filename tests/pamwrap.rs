@@ -80,6 +80,19 @@ or set PAM_WRAPPER_SO)"
         cmd.arg("-I").arg("rhost=127.0.0.1");
         cmd.arg(service).arg(username).arg(op);
         cmd.env("LD_PRELOAD", &self.wrapper);
+        // Under `-Zsanitizer=address` the fixture cdylib expects the ASan
+        // runtime to exist in the host process. pamtester is uninstrumented,
+        // so the runtime must be preloaded ahead of pam_wrapper. The ASan job
+        // sets this to the compiler-rt runtime; nothing else needs it.
+        if let Ok(prepend) = std::env::var("PAMSM_TEST_PREPEND_PRELOAD") {
+            cmd.env(
+                "LD_PRELOAD",
+                format!("{prepend}:{}", self.wrapper.display()),
+            );
+            // pam_wrapper dlopens service modules with RTLD_DEEPBIND, which
+            // the ASan runtime refuses; it offers this switch for that case.
+            cmd.env("PAM_WRAPPER_DISABLE_DEEPBIND", "1");
+        }
         cmd.env("PAM_WRAPPER", "1");
         cmd.env("PAM_WRAPPER_SERVICE_DIR", &self.service_dir);
         cmd.env("PAMSM_TEST", EXPECTED_ENV_VALUE);
