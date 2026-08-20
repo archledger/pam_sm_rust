@@ -90,8 +90,13 @@ or set PAM_WRAPPER_SO)"
                 format!("{prepend}:{}", self.wrapper.display()),
             );
             // pam_wrapper dlopens service modules with RTLD_DEEPBIND, which
-            // the ASan runtime refuses; it offers this switch for that case.
+            // the ASan runtime refuses. Older pam_wrapper (1.1.5 on Ubuntu
+            // noble) reads UID_WRAPPER_DISABLE_DEEPBIND; 1.1.7+ renamed it to
+            // PAM_WRAPPER_DISABLE_DEEPBIND. Set both so either build accepts.
+            // The runtime's own "libasan.so" LD_PRELOAD autodetection does not
+            // match libclang_rt.asan, so the env switches are required.
             cmd.env("PAM_WRAPPER_DISABLE_DEEPBIND", "1");
+            cmd.env("UID_WRAPPER_DISABLE_DEEPBIND", "1");
         }
         cmd.env("PAM_WRAPPER", "1");
         cmd.env("PAM_WRAPPER_SERVICE_DIR", &self.service_dir);
