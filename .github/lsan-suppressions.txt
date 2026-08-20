@@ -1,0 +1,13 @@
+# LeakSanitizer suppressions. Every entry needs a named allocation stack and
+# a written rationale; anything not listed here is a failure.
+#
+# Rationale: the C-ABI panic containment seam deliberately `mem::forget`s the
+# panic payload after catching it (see src/entrypoint.rs and
+# src/module_data.rs). A payload's destructor can itself panic and unwind
+# across the pam_sm_* C boundary, so the small payload allocation (a boxed
+# static string, 16 bytes per contained panic) is intentionally leaked
+# instead of dropped. The panic-containment tests trigger this path on
+# purpose, so LSan sees the allocation with no free. Product code never
+# leaks; only the test-driven containment path does, bounded by the number
+# of deliberately injected panics.
+leak:*StaticStrPayload*

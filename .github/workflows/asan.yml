@@ -46,7 +46,9 @@ jobs:
       - name: Run the full suite under ASan/LSan (explicit target and symbolizer)
         env:
           ASAN_OPTIONS: ${{ env.ASAN_OPTIONS }}:external_symbolizer_path=/usr/bin/llvm-symbolizer
-          LSAN_OPTIONS: external_symbolizer_path=/usr/bin/llvm-symbolizer
+          # Suppressions are limited to the documented deliberate leak of
+          # contained panic payloads; see .github/lsan-suppressions.txt.
+          LSAN_OPTIONS: external_symbolizer_path=/usr/bin/llvm-symbolizer:suppressions=${{ github.workspace }}/.github/lsan-suppressions.txt:print_suppressions=1
         run: |
           set -euo pipefail
           rustup component add rustfmt clippy || true
