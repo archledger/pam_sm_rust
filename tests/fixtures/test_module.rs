@@ -119,8 +119,25 @@ fn assert_env_and_items(pamh: &Pam, hook: &'static str) -> PamError {
             return e;
         }
     };
+    // Optional items: logged as `(unset)` when the application set none.
+    let optional = |name: &str, item: PamResult<Option<&CStr>>| match item {
+        Ok(Some(value)) => Ok(value.to_string_lossy().into_owned()),
+        Ok(None) => Ok("(unset)".to_string()),
+        Err(e) => {
+            log_context(&format!("failure:{hook}:{name}-error:{e:?}"));
+            Err(e)
+        }
+    };
+    let tty = match optional("tty", pamh.get_tty()) {
+        Ok(tty) => tty,
+        Err(e) => return e,
+    };
+    let xdisplay = match optional("xdisplay", pamh.get_xdisplay()) {
+        Ok(xdisplay) => xdisplay,
+        Err(e) => return e,
+    };
     log_context(&format!(
-        "{hook} env={EXPECTED_ENV_VALUE} user={} service={} rhost={}",
+        "{hook} env={EXPECTED_ENV_VALUE} user={} service={} rhost={} tty={tty} xdisplay={xdisplay}",
         user.to_string_lossy(),
         service.to_string_lossy(),
         rhost.to_string_lossy()

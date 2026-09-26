@@ -202,6 +202,22 @@ the governance checkpoint; superseded the interim soft-gated CI.
   `git diff` before the force-push). Done before any consumer pinned the
   branch or tag existed.
 
+### Terminal and X display items
+
+Fork commit `feat: read the PAM_TTY and PAM_XDISPLAY items`, for irlume plan
+item 1.11 (irlume PR #866 and its follow-up): pam_irlume must tell a login
+screen on a remote X server (XDMCP, `PAM_XDISPLAY` of `host:N`) from a local
+one.
+
+- Add `PamLibExt::get_tty` (`PAM_TTY`) and `PamLibExt::get_xdisplay`
+  (`PAM_XDISPLAY`, a Linux-PAM extension), string items read through the
+  same checked `get_cstr_item` path as `get_rhost`. The trait is sealed, so
+  the added methods break no implementor.
+- The fixture module logs both items (`(unset)` when absent). Every
+  pam_wrapper case passes `tty=tty7` through pamtester and asserts it and an
+  unset display; `pamwrap_xdisplay_item` sets `PAM_XDISPLAY` through
+  pam_wrapper's `pam_set_items.so`, which pamtester cannot, and asserts it.
+
 ## Updating from upstream
 
 1. Fetch the original `master` into the fork's `master` without downstream

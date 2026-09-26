@@ -75,9 +75,22 @@ or set PAM_WRAPPER_SO)"
     }
 
     fn run(&self, service: &str, op: &str, username: &str) -> (bool, String) {
+        self.run_with_env(service, op, username, &[])
+    }
+
+    /// [`Harness::run`] with extra environment for the PAM stack, such as
+    /// the items a `pam_set_items.so` line reads.
+    fn run_with_env(
+        &self,
+        service: &str,
+        op: &str,
+        username: &str,
+        env: &[(&str, &str)],
+    ) -> (bool, String) {
         fs::create_dir_all(&self.logs_root).unwrap();
         let mut cmd = Command::new("pamtester");
         cmd.arg("-I").arg("rhost=127.0.0.1");
+        cmd.arg("-I").arg("tty=tty7");
         cmd.arg(service).arg(username).arg(op);
         cmd.env("LD_PRELOAD", &self.wrapper);
         // Under `-Zsanitizer=address` the fixture cdylib expects the ASan
@@ -104,6 +117,8 @@ or set PAM_WRAPPER_SO)"
         cmd.env("PAMSM_TEST_LOG_DIR", &self.logs_root);
         cmd.env("PAMSM_TEST_CASE", format!("{username}:{op}"));
         cmd.env_remove("PAM_AUTHTOK");
+        cmd.env_remove("PAM_XDISPLAY");
+        cmd.envs(env.iter().copied());
 
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -343,11 +358,53 @@ fn assert_trace_and_output(op: &str, out: &str, trace: &str) {
         "expected fixture to assert PAM rhost"
     );
     assert!(
+        trace.contains("tty=tty7"),
+        "expected fixture to read PAM tty"
+    );
+    assert!(
+        trace.contains("xdisplay=(unset)"),
+        "expected fixture to read an unset PAM xdisplay"
+    );
+    assert!(
         trace.contains(&format!("cleanup:{op}")),
         "{}",
         format!("expected cleanup callback for {op}")
     );
     assert!(trace.contains("env=ready"), "expected env marker");
+}
+
+/// `PAM_XDISPLAY`, which pamtester cannot set, set from the environment by
+/// pam_wrapper's `pam_set_items.so` ahead of the module.
+#[test]
+#[ignore = "needs pam_wrapper and pamtester (CI installs them); see test header"]
+fn pamwrap_xdisplay_item() {
+    let Some(h) = Harness::try_new("xdisplay") else {
+        return;
+    };
+    let set_items = h
+        .wrapper
+        .parent()
+        .unwrap()
+        .join("pam_wrapper/pam_set_items.so");
+    assert!(
+        set_items.exists(),
+        "pam_set_items.so not next to {}; pam_wrapper installs it",
+        h.wrapper.display()
+    );
+    let service = "pamsm-xdisplay";
+    let mut lines = vec![format!("auth required {}", set_items.display())];
+    lines.extend(h.service_lines());
+    h.write_service(service, &lines);
+    let (ok, out) = h.run_with_env(
+        service,
+        "authenticate",
+        "tester",
+        &[("PAM_XDISPLAY", "remote.example:0")],
+    );
+    let trace = read_trace(&h);
+    assert!(ok, "{out}");
+    assert!(trace.contains("xdisplay=remote.example:0"), "{trace}");
+    assert!(trace.contains("tty=tty7"), "{trace}");
 }
 
 #[test]
