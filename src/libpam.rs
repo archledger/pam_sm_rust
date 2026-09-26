@@ -310,6 +310,15 @@ pub trait PamLibExt: private::Sealed {
     /// Get the remote hostname.
     fn get_rhost(&self) -> PamResult<Option<&CStr>>;
 
+    /// Get the terminal name (PAM_TTY). A graphical login manager may set
+    /// it to its X display instead of a tty.
+    fn get_tty(&self) -> PamResult<Option<&CStr>>;
+
+    /// Get the X display name (PAM_XDISPLAY, a Linux-PAM extension). A
+    /// display manager sets it to the display its login screen runs on:
+    /// `:0` for a local one, `host:0` for a remote X server (XDMCP).
+    fn get_xdisplay(&self) -> PamResult<Option<&CStr>>;
+
     /// Get the remote username.
     fn get_ruser(&self) -> PamResult<Option<&CStr>>;
 
@@ -459,6 +468,14 @@ impl PamLibExt for Pam {
 
     fn get_rhost(&self) -> PamResult<Option<&CStr>> {
         self.get_cstr_item(PamItemType::RHOST)
+    }
+
+    fn get_tty(&self) -> PamResult<Option<&CStr>> {
+        self.get_cstr_item(PamItemType::TTY)
+    }
+
+    fn get_xdisplay(&self) -> PamResult<Option<&CStr>> {
+        self.get_cstr_item(PamItemType::XDISPLAY)
     }
 
     fn get_ruser(&self) -> PamResult<Option<&CStr>> {
